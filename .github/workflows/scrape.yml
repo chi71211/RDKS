@@ -1,0 +1,35 @@
+name: 自動化 RDKS 爬蟲
+
+# 設定排程時間 (使用 Cron 語法)
+on:
+  schedule:
+    # 範例：每週一的凌晨 2 點 (UTC 時間) 執行
+    - cron: '0 2 * * 1'
+  # 允許手動在 GitHub 網頁上點擊按鈕執行
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 安裝套件
+        run: |
+          pip install requests pandas openpyxl
+
+      - name: 執行爬蟲腳本
+        run: python ES.py # 您的 Python 檔案名稱
+
+      - name: 上傳爬取結果 (Excel/SQL)
+        uses: actions/upload-artifact@v3
+        with:
+          name: RDKS
+          # 指定要保留讓您下載的資料夾或檔案
+          path: RDKS/
