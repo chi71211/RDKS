@@ -293,13 +293,13 @@ def main_scraper_all():
                 ]
                 df_brand = df_brand.reindex(columns=columns_order)
                 
-                # 3. 智慧合併邏輯 (只要 型號、HSN、TSN 一樣就自動合併，其餘差異資訊用 " | " 隔開)
+                # 3. 智慧合併邏輯 (只要 型號、HSN、TSN 一樣就自動合併，其餘差異資訊用 ", " 隔開)
                 group_cols = ['品牌', '車系', '型號', '年份', 'HSN', 'TSN']
                 df_brand = df_brand.fillna("")
                 
-                # 執行合併
+                # 執行合併，使用逗號分隔
                 df_brand = df_brand.groupby(group_cols, as_index=False).agg(
-                    lambda x: ' | '.join(sorted(list(set(str(v) for v in x if str(v).strip()))))
+                    lambda x: ', '.join(sorted(list(set(str(v) for v in x if str(v).strip()))))
                 )
                 
                 # 4. 再次確保合併後的順序正確
