@@ -1,0 +1,61 @@
+name: 自動化 RDKS 爬蟲
+
+# 設定排程時間
+on:
+  schedule:
+    - cron: '0 2 * * 1' # 每週一凌晨 2 點 (UTC 時間，約台灣時間早上 10 點)
+  workflow_dispatch: # 允許手動隨時執行
+
+# 🌟 關鍵設定：允許此工作流將檔案（資料庫與 Excel）提交並寫入回您的 GitHub 倉庫
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # 5.8 小時超時限制 (比 Python 內設的 5.5 小時多一點，確保有時間存檔)
+
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝套件
+        run: |
+          pip install requests pandas openpyxl urllib3
+
+      - name: 執行爬蟲腳本
+        run: python ES-E.py
+
+      # 🌟 備份防線 1：即使超時或中斷，依然強制打包成 Artifacts 供手動下載
+      - name: 上傳爬取結果 (Artifacts 備份)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDKS-E
+          path: |
+            RDKS-E/
+            RDKS-E.db
+            RDKS-E.sql
+
+      # 🌟 備份防線 2：即使超時，也自動將最新的 db、sql 與 excel 提交並 push 回 GitHub！
+      - name: 提交並推送更新進度到 GitHub
+        if: always()
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # 將所有產出的資料夾與資料庫加入 git 暫存區
+          git add RDKS.db RDKS_Backup.sql RDKS-E/ || true
+          
+          # 檢查是否有任何檔案變更，有變更才進行提交，避免指令因無變更而報錯中斷
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "沒有偵測到任何資料更新，跳過提交。"
+          else
+            git commit -m "🤖 [自動存檔] 爬蟲進度與資料庫更新 [skip ci]"
+            git push
+          fi
