@@ -11,11 +11,19 @@ import time
 import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from tqdm import tqdm
 
+# ==========================================
+# 全域設定
+# ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.db')
 SQL_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.sql')
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'scrape_progress.json')
+
+# 🌟 新增：設定最大執行時間（5.8 小時 = 20880 秒），預留時間給 GitHub 存檔
+MAX_RUNTIME_SECONDS = 5.8 * 3600 
+PROGRAM_START_TIME = time.time()
 
 session = requests.Session()
 retry_strategy = Retry(total=5, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
@@ -29,7 +37,9 @@ session.headers.update({
     "Connection": "keep-alive"
 })
 
-# ====================== 進度管理 ======================
+# ==========================================
+# 1. 進度與週期管理
+# ==========================================
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
         try:
@@ -54,14 +64,16 @@ def save_progress(brand="", car_class="", tg_id="", completed=False):
 def check_7_day_cycle():
     prog = load_progress()
     if time.time() - prog.get("cycle_start", 0) > 604800:
-        print("\n⏳ 超過 7 天，啟動全面掃描模式...")
+        print("\n⏳ [週期檢查] 超過 7 天，啟動全面掃描（保留歷史資料）...")
         fresh = {"cycle_start": time.time(), "last_brand": "", "last_class": "", "last_tg": ""}
         with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
             json.dump(fresh, f)
         return fresh, True
     return prog, False
 
-# ====================== API 請求 ======================
+# ==========================================
+# 2. 安全請求 & 輔助函式
+# ==========================================
 def safe_json_get(url, params=None, timeout=15):
     try:
         r = session.get(url, params=params, timeout=timeout)
@@ -72,18 +84,19 @@ def safe_json_get(url, params=None, timeout=15):
             print("⚠️ Rate Limit，等待 10 秒...")
             time.sleep(10)
         else:
-            print(f"請求失敗 {url}")
+            print(f"請求失敗 {url}: {e}")
         time.sleep(1.5)
         return []
 
 def get_manufacturers(): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/manufacturers")
 def get_classes(brand): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/classes", {"manufacturer": brand})
-def get_type_groups(brand, car_class): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/type-groups", {"manufacturer": brand, "class": car_class})
-def get_versions(tg): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/version-groups", {"group": tg})
+def get_type_groups(brand, car_class): 
+    return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/type-groups", {"manufacturer": brand, "class": car_class})
+def get_versions(tg): 
+    return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/version-groups", {"group": tg})
 def get_car_hsn_tsn(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/car", {"carTag": tag})
 def get_tpms(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/tpms/carTpms", {"carTag": tag})
 
-# ====================== 輔助函式 ======================
 def format_year(d): 
     return "至今" if not d or d == "0000-00-00" else d[:7]
 
@@ -104,10 +117,13 @@ def find_key_value(d, keywords):
             if res: return res
     return ""
 
-# ====================== 資料庫 ======================
+# ==========================================
+# 資料庫
+# ==========================================
 def save_batch_to_sql(batch_data):
     if not batch_data: return
     df = pd.DataFrame(batch_data).fillna("")
+
     group_cols = ['品牌', '車系', '型號', '年份起點', '年份終點', 'HSN', 'TSN']
     agg_dict = {
         'OE感測器': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
@@ -117,6 +133,7 @@ def save_batch_to_sql(batch_data):
     }
     for col in group_cols:
         agg_dict[col] = 'first'
+
     df_merged = df.groupby(group_cols, as_index=False).agg(agg_dict)
     cols = ['品牌','車系','型號','年份起點','年份終點','HSN','TSN',
             '建設日期(Baujahr)','OE感測器','廠商(Hersteller)','頻率(Frequenz)']
@@ -139,9 +156,11 @@ def auto_export_sql():
         for line in conn.iterdump():
             f.write(f'{line}\n')
     conn.close()
-    print(f"🎉 SQL 備份完成")
+    print(f"🎉 SQL 備份完成: {os.path.basename(SQL_PATH)}")
 
-# ====================== 主程式 ======================
+# ==========================================
+# 主程式
+# ==========================================
 def main_scraper_all():
     folder_path = os.path.join(SCRIPT_DIR, sanitize_filename("胎壓偵測"))
     os.makedirs(folder_path, exist_ok=True)
@@ -156,41 +175,51 @@ def main_scraper_all():
 
     # 建立資料表
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS tpms_sensors (
-            品牌 TEXT, 車系 TEXT, 型號 TEXT, 年份起點 TEXT, 年份終點 TEXT,
-            HSN TEXT, TSN TEXT, "建設日期(Baujahr)" TEXT, 
-            OE感測器 TEXT, "廠商(Hersteller)" TEXT, "頻率(Frequenz)" TEXT,
-            UNIQUE(品牌, 車系, 型號, 年份起點, HSN, TSN)
-        )
-    ''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS tpms_sensors (
+        品牌 TEXT, 車系 TEXT, 型號 TEXT, 年份起點 TEXT, 年份終點 TEXT,
+        HSN TEXT, TSN TEXT, "建設日期(Baujahr)" TEXT, 
+        OE感測器 TEXT, "廠商(Hersteller)" TEXT, "頻率(Frequenz)" TEXT,
+        UNIQUE(品牌, 車系, 型號, 年份起點, HSN, TSN)
+    )''')
     conn.commit()
     conn.close()
 
     batch_data = []
-    print(f"🔍 開始處理 {len(brands)} 個品牌...\n")
+    completed_brands = []
+    time_limit_reached = False # 🌟 新增：超時標記
 
-    for brand in brands:
+    print(f"🔍 共 {len(brands)} 個品牌\n")
+
+    for brand in tqdm(brands, desc="總進度", ncols=100):
+        if time_limit_reached:
+            break
+
         if skip_mode and brand != prog.get("last_brand"):
-            print(f"⏭️ 已完成: {brand} ✅")
+            tqdm.write(f"⏭️ 已完成: {brand} ✅")
+            completed_brands.append(brand)
             continue
 
         if skip_mode and brand == prog.get("last_brand"):
             skip_mode = False
-            print(f"▶️ 從 {brand} 繼續...")
+            tqdm.write(f"▶️ 從 {brand} 繼續...")
 
-        print(f"\n🚗 正在處理: 【{brand}】")
+        tqdm.write(f"\n🚗 正在處理: 【{brand}】")
         save_progress(brand=brand)
 
         classes = get_classes(brand)
         if not isinstance(classes, list): classes = []
 
-        for car_class in classes:
-            print(f"   📌 車系: {car_class}")
+        for car_class in tqdm(classes, desc=f"{brand} 車系", leave=False, ncols=80):
+            if time_limit_reached:
+                break
+
             type_groups = get_type_groups(brand, car_class)
             if not isinstance(type_groups, list): type_groups = []
 
             for tg_data in type_groups:
+                if time_limit_reached:
+                    break
+
                 tg_id = tg_data.get("group") if isinstance(tg_data, dict) else None
                 if not tg_id: continue
 
@@ -205,6 +234,12 @@ def main_scraper_all():
                 versions.sort(key=lambda x: x.get('productionFrom', ''), reverse=True)
 
                 for version in versions:
+                    # 🌟 核心：每次處理前檢查是否即將超時
+                    if time.time() - PROGRAM_START_TIME > MAX_RUNTIME_SECONDS:
+                        tqdm.write(f"\n⏱️ 警告：執行時間即將超過 6 小時限制！觸發安全暫停...")
+                        time_limit_reached = True
+                        break # 中斷最內層迴圈
+
                     car_tag = str(version.get("tag") or version.get("carTag") or "")
                     if not car_tag: continue
 
@@ -229,8 +264,8 @@ def main_scraper_all():
                                     frequenz = s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
                                     if not frequenz:
                                         sd = str(s).lower()
-                                        frequenz = next((f for f in ['433','434','315'] if f in sd), '')
-                                    baujahr = s.get("baujahr") or find_key_value(s, ['baujahr'])
+                                        frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
+                                    baujahr = s.get("baujahr") or find_key_value(s, ['baujahr','year'])
                                     if not baujahr or baujahr == "0000-00-00":
                                         baujahr = f"{year_from} ~ {year_to}"
                                     oe_list.append({
@@ -259,21 +294,138 @@ def main_scraper_all():
                             batch_data.clear()
 
                     except Exception as e:
-                        print(f"⚠️ 錯誤 {model_version}: {e}")
+                        tqdm.write(f"⚠️ 異常 {model_version}: {e}")
 
+            # 車系結束後強制存檔
             if batch_data:
                 save_batch_to_sql(batch_data)
                 batch_data.clear()
-            print(f"   ✅ 車系完成: {car_class}")
 
-        print(f"🎉 品牌完成: 【{brand}】 ✅\n")
+            if not time_limit_reached:
+                tqdm.write(f"   ✅ 車系完成: {car_class}")
 
+        # 品牌完成後匯出 Excel
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql_query("SELECT * FROM tpms_sensors WHERE 品牌=?", conn, params=(brand,))
+            conn.close()
+            if not df.empty:
+                df['年份'] = df['年份起點'].astype(str) + " ~ " + df['年份終點'].astype(str)
+                order = ['品牌','車系','型號','年份','HSN','TSN','建設日期(Baujahr)','OE感測器','廠商(Hersteller)','頻率(Frequenz)']
+                df = df.reindex(columns=order)
+                path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
+                df.to_excel(path, index=False)
+                if not time_limit_reached:
+                    tqdm.write(f"✅ {brand} Excel 匯出完成 → {len(df)} 筆")
+        except Exception as e:
+            tqdm.write(f"⚠️ Excel 匯出失敗: {e}")
+
+        if not time_limit_reached:
+            completed_brands.append(brand)
+            tqdm.write(f"🎉 品牌完成: 【{brand}】 ✅")
+
+    # 最終總結
     print("\n" + "="*60)
-    print("🎊 全部任務完成！")
+    if time_limit_reached:
+        print("⏸️ 爬蟲任務因接近 6 小時限制而暫停！")
+        print(f"進度已安全儲存，下次將從斷點繼續。")
+    else:
+        print("🎊 爬蟲任務全部完成！")
+        save_progress(completed=True) # 只有全部跑完才清除進度
+
+    print(f"✅ 此次共完整處理 {len(completed_brands)} 個品牌")
     print("="*60)
 
-    save_progress(completed=True)
     auto_export_sql()
 
 if __name__ == "__main__":
     main_scraper_all()
+```eof
+
+### 改造二：修改 GitHub Actions YAML 設定檔
+
+要讓檔案能「接續寫在一起」，最核心的關鍵是：**GitHub Actions 每次啟動時，必須把「上一次」產生的資料庫（`RDKS.db`）和進度檔（`scrape_progress.json`）給「下載」回來。**
+
+在原本的設定中，機器人每次醒來都是一台全新的乾淨虛擬機。現在，我們加入一個「拉取上一次進度」的步驟，然後把您的排程設定為每 6 小時自動喚醒一次。
+
+請修改 `.github/workflows/scrape.yml`：
+
+```yaml:.github/workflows/scrape.yml
+name: 自動化 RDKS 爬蟲
+
+# 設定排程時間
+on:
+  schedule:
+    - cron: '0 */6 * * *' # 每天每 6 小時喚醒一次
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 給足 6 小時
+
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v4
+        with:
+          # 🌟 關鍵：取得包含所有 commit 歷史的程式碼，確保能拉到上一次存下來的 db 和 json
+          fetch-depth: 0 
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝套件
+        run: |
+          pip install requests pandas openpyxl urllib3 tqdm
+
+      - name: 執行爬蟲腳本
+        run: python 胎壓自動.py
+
+      - name: 上傳爬取結果 (Artifacts 備份)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDKS_Data_Backup
+          path: |
+            胎壓偵測/
+            胎壓偵測.db
+            胎壓偵測.sql
+            scrape_progress.json
+
+      - name: 提交並推送更新進度到 GitHub
+        if: always()
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # 🌟 關鍵：強制加入進度檔與資料庫
+          git add -f 胎壓偵測.db || true
+          git add -f 胎壓偵測.sql || true
+          git add -f scrape_progress.json || true
+          git add -f 胎壓偵測/ || true
+          
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "沒有偵測到任何資料更新，跳過提交。"
+          else
+            git commit -m "🤖 [自動存檔] 爬蟲進度與資料庫更新 [skip ci]"
+            git push
+          fi
+```eof
+
+### 運作原理解析
+
+有了這雙重改造，系統的運作會變成這樣：
+
+1. **第 1 小時 ~ 5.8 小時**：機器人開心抓取資料。
+2. **5.8 小時**：Python 腳本的「碼錶」響了！它會優雅地停下迴圈，把目前抓到的所有資料存進 `胎壓偵測.db`，並把斷點記在 `scrape_progress.json`。
+3. **5.8 ~ 6 小時**：YAML 設定檔接手，把這些檔案 `git commit` 並 `git push` 到您的 GitHub 首頁。
+4. **第 6 小時**：下一個排程時間到了！GitHub 喚醒一台新的虛擬機器。
+5. **關鍵動作**：這台新的機器因為我們設定了 `actions/checkout@v4`，它會從 GitHub 首頁把**剛剛熱騰騰上傳的資料庫和進度檔下載下來**。
+6. **接續運作**：Python 腳本啟動，讀到 `scrape_progress.json`，發現上次斷在某個型號；它同時也連上了剛剛下載的 `胎壓偵測.db`。它接著上次的地方抓，並把新資料無縫 `REPLACE INTO` 同一個資料庫裡！
+
+這就是完美的「自動接力跑」機制！
