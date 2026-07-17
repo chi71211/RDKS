@@ -1,10 +1,6 @@
 """
-AutoBild 爬蟲系統 - 終極融合完整版 (Windows 友善 + 深層精準萃取)
-特色：
-1. Windows 相對路徑 (檔案直接存在程式旁邊)
-2. 恢復「款式 (Variant) 深層迴圈與 SPA 切換」，確保不漏抓任何引擎規格
-3. TreeWalker 文本樹精準萃取，徹底解決抓到文章或亂碼的問題
-4. SQLite + CSV 雙重增量儲存
+AutoBild 爬蟲系統 - 終極企業版 (v3.3 最終推薦版)
+特色：TreeWalker 精準萃取 + 斷點續傳 + 智慧延遲 + 雙儲存 (SQLite + CSV)
 """
 
 import nest_asyncio
@@ -12,6 +8,7 @@ nest_asyncio.apply()
 import asyncio
 import os
 import sys
+import time
 import json
 import random
 import sqlite3
@@ -22,16 +19,16 @@ from playwright.async_api import async_playwright
 from IPython.display import display
 
 # ==========================================
-# 1. 系統配置 (Windows 友善路徑)
+# 配置
 # ==========================================
 class Config:
     BASE_URL = "https://www.autobild.de"
-    CATALOG_URL = f"{BASE_URL}/marken-modelle/#aktuell"
+    CATALOG_URL = f"{BASE_URL}/marken-modelle/"
     
-    # 改為相對路徑，檔案會與本程式放在同一個資料夾
-    CSV_DIR = "AutoBild_Exports"
-    DB_FILE = "autobild_master.db"
-    PROGRESS_FILE = "scrape_progress.json"
+    # 使用家目錄避免唯讀錯誤
+    CSV_DIR = os.path.expanduser("~/AutoBild_Exports")
+    DB_FILE = os.path.expanduser("~/autobild_master.db")
+    PROGRESS_FILE = os.path.expanduser("~/scrape_progress.json")
     
     BATCH_SIZE = 80
     FULL_RESCAN_DAYS = 7
@@ -39,7 +36,7 @@ class Config:
     DELAY_MAX = 1.45
 
 # ==========================================
-# 2. 智慧延遲模組 (防封鎖)
+# 智慧延遲
 # ==========================================
 async def smart_delay(success=True):
     delay = random.uniform(Config.DELAY_MIN, Config.DELAY_MAX) if success else random.uniform(2.0, 4.0)
@@ -48,38 +45,38 @@ async def smart_delay(success=True):
     await asyncio.sleep(max(0.4, min(delay, 5.5)))
 
 # ==========================================
-# 3. 進度管理模組 (斷點續傳與7天重掃)
+# 進度管理
 # ==========================================
 class ProgressManager:
     def __init__(self):
         self.data = {"last_full_scan": datetime.now().isoformat(), "completed_brands": [], "completed_models": {}}
         self.load()
-    
+   
     def load(self):
         if os.path.exists(Config.PROGRESS_FILE):
             with open(Config.PROGRESS_FILE, 'r', encoding='utf-8') as f:
                 self.data = json.load(f)
             last = datetime.fromisoformat(self.data.get("last_full_scan"))
             if datetime.now() - last > timedelta(days=Config.FULL_RESCAN_DAYS):
-                print("🔄 距上次全面掃描已超過 7 天，自動重啟全面掃描偵測改款...")
+                print("🔄 超過7天，自動重掃...")
                 self.reset_progress()
-    
+   
     def save(self):
         with open(Config.PROGRESS_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
-    
+   
     def mark_brand_done(self, brand: str):
         if brand not in self.data["completed_brands"]:
             self.data["completed_brands"].append(brand)
             self.save()
-    
+   
     def mark_model_done(self, brand: str, model: str):
         if brand not in self.data["completed_models"]:
             self.data["completed_models"][brand] = []
         if model not in self.data["completed_models"][brand]:
             self.data["completed_models"][brand].append(model)
             self.save()
-    
+   
     def reset_progress(self):
         self.data["last_full_scan"] = datetime.now().isoformat()
         self.data["completed_brands"] = []
@@ -87,16 +84,17 @@ class ProgressManager:
         self.save()
 
 # ==========================================
-# 4. 資料庫模組 (SQLite 去重 + CSV 匯出)
+# 資料庫
 # ==========================================
 class DatabaseManager:
     def __init__(self):
         os.makedirs(Config.CSV_DIR, exist_ok=True)
+        print(f"✅ 資料儲存至：{Config.CSV_DIR}")
         self.conn = sqlite3.connect(Config.DB_FILE)
         self.cursor = self.conn.cursor()
         self.batch = []
         self._init_db()
-    
+   
     def _init_db(self):
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS car_catalog (
@@ -104,108 +102,80 @@ class DatabaseManager:
                 UNIQUE(廠牌, 車型, 年份, HSN_TSN)
             )
         ''')
-        # 加入款式數量狀態表 (用來偵測改款)
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS model_status (
-                廠牌 TEXT, 車型 TEXT, variant_count INTEGER,
-                PRIMARY KEY(廠牌, 車型)
-            )
-        ''')
         self.conn.commit()
-
-    def get_known_variants_count(self, brand: str, model: str):
-        self.cursor.execute('SELECT variant_count FROM model_status WHERE 廠牌=? AND 車型=?', (brand, model))
-        row = self.cursor.fetchone()
-        return row[0] if row else None
-
-    def update_model_status(self, brand: str, model: str, count: int):
-        self.cursor.execute('''
-            INSERT OR REPLACE INTO model_status (廠牌, 車型, variant_count)
-            VALUES (?, ?, ?)
-        ''', (brand, model, count))
-        self.conn.commit()
-    
+   
     def add_to_batch(self, record: dict):
         self.batch.append(record)
         if len(self.batch) >= Config.BATCH_SIZE:
             self.flush()
-    
+   
     def flush(self):
         if not self.batch: return
-        # 寫入 SQLite
         for r in self.batch:
             self.cursor.execute('''
                 INSERT OR IGNORE INTO car_catalog (廠牌, 車型, 年份, HSN_TSN)
                 VALUES (?, ?, ?, ?)
             ''', (r['廠牌'], r['車型'], r['年份'], r['HSN_TSN']))
         self.conn.commit()
-        
-        # 寫入 CSV (使用 utf-8-sig 防止 Windows Excel 亂碼)
+       
         df = pd.DataFrame(self.batch)
         for b in df['廠牌'].unique():
             sub = df[df['廠牌'] == b]
             path = os.path.join(Config.CSV_DIR, f"{b}.csv")
             sub.to_csv(path, mode='a', index=False, header=not os.path.exists(path), encoding='utf-8-sig')
         self.batch.clear()
-    
+   
     def close(self):
         self.flush()
         self.conn.close()
 
 # ==========================================
-# 5. 主爬蟲引擎 (深層萃取邏輯)
+# 主爬蟲
 # ==========================================
 async def full_catalog_scraper(test_mode=False):
     prog = ProgressManager()
     db = DatabaseManager()
-    
-    print("🚀 啟動終極融合版型錄爬蟲...")
-    print(f"📂 資料將儲存於: {os.path.abspath(Config.CSV_DIR)}")
-    
+   
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        
         try:
             await page.goto(Config.CATALOG_URL, timeout=90000, wait_until="domcontentloaded")
             await smart_delay()
-            
-            # 處理 Cookie
+           
+            # Cookie
             try:
                 iframe = page.frame_locator('iframe[id^="sp_message_iframe"]')
                 await iframe.get_by_role("button", name="Alle akzeptieren").click(timeout=8000)
             except: pass
-            
+           
             await page.evaluate("window.scrollTo(0, 1200)")
             await smart_delay()
-            
-            # 取得所有品牌連結
+           
+            # 品牌
             links = await page.query_selector_all("a[href*='/marken-modelle/']")
             brand_urls = []
             seen = set()
             for link in links:
                 href = await link.get_attribute("href")
-                if href and "/marken-modelle/" in href and href.count("/") >= 4:
+                if href and "/marken-modelle/" in href:
                     full = Config.BASE_URL + href if not href.startswith("http") else href
                     full = full.split("#")[0].split("?")[0]
                     if full.endswith("/") and full not in seen:
                         seen.add(full)
                         brand_urls.append(full)
-            
-            brand_urls.sort(reverse=True)
-            if test_mode: brand_urls = brand_urls[:2]
-            
-            # 遍歷品牌
+           
+            if test_mode: brand_urls = brand_urls[:3]
+           
             for b_url in brand_urls:
                 brand = b_url.strip("/").split("/")[-1].upper()
                 if brand in prog.data["completed_brands"] and not test_mode:
                     continue
-                
-                print(f"\n➔ 進入廠牌: {brand}")
+               
                 await page.goto(b_url, timeout=60000)
                 await smart_delay()
-                
-                # 取得該品牌下所有車系連結
+               
+                # 車系
                 model_links = await page.query_selector_all("a[href*='/marken-modelle/']")
                 models = []
                 for ml in model_links:
@@ -215,162 +185,73 @@ async def full_catalog_scraper(test_mode=False):
                         models.append(full_m.split("#")[0])
                 models = list(dict.fromkeys(models))
                 if test_mode: models = models[:2]
-                
-                # 遍歷車系
+               
                 for m_url in models:
                     model_name = m_url.strip("/").split("/")[-1].replace("-", " ").title()
-                    if model_name in prog.data.get("completed_models", {}).get(brand, []) and not test_mode:
+                    if model_name in prog.data.get("completed_models", {}).get(brand, []):
                         continue
-                    
+                   
                     await page.goto(m_url, timeout=60000)
-                    
-                    # 💡 深層掃描：展開 Kraftstoffart 面板以顯示所有車款
-                    await page.evaluate(r'''async () => {
-                        window.scrollBy(0, 600);
-                        const t = Array.from(document.querySelectorAll('span, div, button')).find(el => el.innerText && el.innerText.includes('Kraftstoffart') && el.childElementCount === 0);
-                        if (t) { try{t.click();}catch(e){} try{t.parentElement.click();}catch(e){} }
-                    }''')
                     await smart_delay()
-
-                    target_count = await page.locator('.vvp__fuelType-dataBodyRow').count()
-                    saved_count = db.get_known_variants_count(brand, model_name)
-
-                    if saved_count == target_count and not test_mode:
-                        print(f"  ⏭️ [略過] {model_name} (已知 {saved_count} 款，無新改款)")
-                        prog.mark_model_done(brand, model_name)
-                        continue
-
-                    if target_count == 0:
-                        db.add_to_batch({"廠牌": brand, "車型": model_name, "年份": "無資料", "HSN_TSN": "無資料"})
-                    else:
-                        print(f"  ↳ [{brand} - {model_name}] 偵測到 {target_count} 個具體款式，準備深度擷取...")
-                        
-                        # 💡 遍歷該車系的每一台車款
-                        for i in range(target_count):
-                            if test_mode and i >= 3: break
-                            
-                            # SPA 極速切換邏輯 (點擊下一台)
-                            if i == 0:
-                                try:
-                                    await page.locator('.vvp__fuelType-dataBodyRow').nth(i).evaluate(r'''row => {
-                                        let arrow = row.querySelector('svg'); let link = row.querySelector('a');
-                                        if (arrow) { arrow.dispatchEvent(new MouseEvent('click', {bubbles:true})); if(arrow.parentElement) arrow.parentElement.click(); }
-                                        else if (link) link.click(); else row.click();
-                                    }''')
-                                except: pass
-                            else:
-                                clicked_next = await page.evaluate(r'''() => {
-                                    let btns = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-                                    let n = btns.find(b => {
-                                        let l = (b.getAttribute('aria-label')||'').toLowerCase(); let h = (b.innerHTML||'').toLowerCase();
-                                        return (l.includes('nächste') || l.includes('next') || (h.includes('right') && h.includes('<svg')));
-                                    });
-                                    if(n) { n.click(); return true; } return false;
-                                }''')
-                                if not clicked_next:
-                                    await page.go_back()
-                                    await smart_delay(success=True)
-                                    try:
-                                        await page.locator('.vvp__fuelType-dataBodyRow').nth(i).evaluate(r'''row => {
-                                            let arrow = row.querySelector('svg'); let link = row.querySelector('a');
-                                            if (arrow) { arrow.dispatchEvent(new MouseEvent('click', {bubbles:true})); if(arrow.parentElement) arrow.parentElement.click(); }
-                                            else if (link) link.click(); else row.click();
-                                        }''')
-                                    except: pass
-
-                            await smart_delay(success=False)
-                            
-                            # 展開 Basisdaten 確保文字露出
-                            await page.evaluate(r'''() => {
-                                Array.from(document.querySelectorAll('span, div, h3, h4, button'))
-                                    .filter(el => el.textContent && el.textContent.trim() === 'Basisdaten')
-                                    .forEach(b => { try{b.click();}catch(e){} try{if(b.parentElement) b.parentElement.click();}catch(e){} });
-                            }''')
-                            await smart_delay()
-
-                            # 💡 終極 TreeWalker 精準萃取 (保證不抓到文章)
-                            car_data = await page.evaluate(r'''() => {
-                                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-                                    acceptNode: function(node) {
-                                        if (node.parentElement && node.parentElement.closest('footer, nav, script, style, .header, .footer')) return NodeFilter.FILTER_REJECT;
-                                        return NodeFilter.FILTER_ACCEPT;
-                                    }
-                                });
-                                const texts = [];
-                                let n;
-                                while (n = walker.nextNode()) {
-                                    let t = n.textContent.trim();
-                                    if (t.length > 0 && t !== ':') texts.push(t);
-                                }
-                                const get = (labels) => {
-                                    for (let label of labels) {
-                                        const idx = texts.findIndex(t => t.toLowerCase() === label.toLowerCase() || t.toLowerCase() === label.toLowerCase() + ':');
-                                        if (idx !== -1 && idx + 1 < texts.length) {
-                                            let val = texts[idx + 1];
-                                            if (val.length < 60) return val;
+                   
+                    # 精準萃取
+                    car_data = await page.evaluate('''() => {
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                        const texts = [];
+                        let node;
+                        while (node = walker.nextNode()) {
+                            let t = node.textContent.trim();
+                            if (t && t.length > 1 && !t.includes('\n')) texts.push(t);
+                        }
+                        const get = (labels) => {
+                            for (let label of labels) {
+                                for (let i = 0; i < texts.length; i++) {
+                                    if (texts[i].toLowerCase().replace(/[:：]/, '') === label.toLowerCase()) {
+                                        if (i + 1 < texts.length) {
+                                            let v = texts[i+1];
+                                            if (v.length < 60) return v;
                                         }
                                     }
-                                    return 'N/A';
-                                };
-                                let hsn = get(["HSN/TSN Schlüsselnummern", "HSN/TSN", "Schlüsselnummer"]);
-                                return {
-                                    Year: get(["Bauzeitraum", "Produktionszeitraum"]),
-                                    HSN_TSN: hsn === '-' ? 'N/A' : hsn
-                                };
-                            }''')
-                            
-                            yr = car_data.get("Year", "N/A")
-                            hsn = car_data.get("HSN_TSN", "N/A")
-                            
-                            # 拆分與寫入批次
-                            if hsn != 'N/A' and ',' in hsn:
-                                for code in [c.strip() for c in hsn.split(',')]:
-                                    db.add_to_batch({"廠牌": brand, "車型": model_name, "年份": yr, "HSN_TSN": code})
-                            else:
-                                db.add_to_batch({"廠牌": brand, "車型": model_name, "年份": yr, "HSN_TSN": hsn})
-                                
-                            sys.stdout.write(f"\r      [寫入中] {brand} {model_name} ({i+1}/{target_count})")
-                            sys.stdout.flush()
-
-                        print() # 換行
-                    
-                    db.flush()
-                    db.update_model_status(brand, model_name, target_count)
+                                }
+                            }
+                            return 'N/A';
+                        };
+                        return {
+                            Year: get(["Bauzeitraum", "Produktionszeitraum"]),
+                            HSN_TSN: get(["HSN/TSN", "HSN/TSN Schlüsselnummern", "Schlüsselnummer"])
+                        };
+                    }''')
+                   
+                    record = {
+                        "廠牌": brand,
+                        "車型": model_name,
+                        "年份": car_data["Year"],
+                        "HSN_TSN": car_data["HSN_TSN"]
+                    }
+                    db.add_to_batch(record)
                     prog.mark_model_done(brand, model_name)
-                    
+                    await smart_delay()
+               
                 prog.mark_brand_done(brand)
-            
-            print("\n🎉 爬蟲任務完美結束！資料已安全存放於資料庫與 CSV 中。")
+           
+            print("\n🎉 爬蟲任務完成！")
         except Exception as e:
-            print(f"\n❌ 執行錯誤 (進度已自動保存): {e}")
+            print(f"❌ 錯誤: {e}")
         finally:
             db.close()
             await browser.close()
 
-# ==========================================
-# 6. 執行入口 (命令列介面)
-# ==========================================
+# 執行
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test", action="store_true", help="測試模式 (只抓取少量資料)")
-    parser.add_argument("--reset", action="store_true", help="清除所有資料庫與進度紀錄")
-    parser.add_argument("--status", action="store_true", help="顯示目前資料庫累積狀態")
+    parser.add_argument("--test", action="store_true")
+    parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
-    
+   
     if args.reset:
         for f in [Config.DB_FILE, Config.PROGRESS_FILE]:
             if os.path.exists(f): os.remove(f)
-        print("✅ 已重置所有進度與資料庫！")
+        print("✅ 重置完成")
         sys.exit(0)
-        
-    if args.status:
-        if os.path.exists(Config.DB_FILE):
-            conn = sqlite3.connect(Config.DB_FILE)
-            try:
-                df = pd.read_sql("SELECT 廠牌, COUNT(DISTINCT 車型) as 車系數, COUNT(*) as 總規格數 FROM car_catalog GROUP BY 廠牌", conn)
-                display(df)
-            except: pass
-            conn.close()
-        sys.exit(0)
-    
+   
     asyncio.run(full_catalog_scraper(test_mode=args.test))
