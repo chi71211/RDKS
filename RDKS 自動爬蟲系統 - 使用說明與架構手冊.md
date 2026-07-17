@@ -58,8 +58,8 @@ flowchart TD
     --> CheckBatchSize{batch_data >= 80 筆?}
     
     CheckBatchSize -- 是 --> SaveDB[save_batch_to_sql<br>Pandas聚合 + REPLACE]
-    SaveDB --> Clear[batch_data.clear()]
-    Clear --> VersionLoop
+    SaveDB --> ClearBatch[清除 batch_data]
+    ClearBatch --> VersionLoop
     
     CheckBatchSize -- 否 --> VersionLoop
     
