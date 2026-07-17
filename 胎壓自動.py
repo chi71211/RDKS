@@ -11,6 +11,7 @@ import time
 import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from tqdm import tqdm
 
 # ==========================================
 # 全域設定
@@ -32,9 +33,7 @@ session.headers.update({
     "Connection": "keep-alive"
 })
 
-# ==========================================
-# 1. 進度與週期管理
-# ==========================================
+# ====================== 進度管理 ======================
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
         try:
@@ -59,16 +58,14 @@ def save_progress(brand="", car_class="", tg_id="", completed=False):
 def check_7_day_cycle():
     prog = load_progress()
     if time.time() - prog.get("cycle_start", 0) > 604800:
-        print("\n⏳ [週期檢查] 超過 7 天，啟動全面掃描（保留歷史資料）...")
+        print("\n⏳ 超過 7 天，啟動全面掃描...")
         fresh = {"cycle_start": time.time(), "last_brand": "", "last_class": "", "last_tg": ""}
         with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
             json.dump(fresh, f)
         return fresh, True
     return prog, False
 
-# ==========================================
-# 2. 安全請求
-# ==========================================
+# ====================== 請求 ======================
 def safe_json_get(url, params=None, timeout=15):
     try:
         r = session.get(url, params=params, timeout=timeout)
@@ -76,27 +73,21 @@ def safe_json_get(url, params=None, timeout=15):
         return r.json() if r.text and r.text.strip() else []
     except Exception as e:
         if "429" in str(e):
-            print("⚠️ Rate Limit，等待 10 秒...")
+            print("⚠️ Rate Limit → 等待 10 秒")
             time.sleep(10)
         else:
-            print(f"請求失敗 {url}: {e}")
+            print(f"請求失敗: {url}")
         time.sleep(1.5)
         return []
 
-# API 函式
 def get_manufacturers(): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/manufacturers")
 def get_classes(brand): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/classes", {"manufacturer": brand})
-def get_type_groups(brand, car_class): 
-    return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/type-groups", 
-                        {"manufacturer": brand, "class": car_class})
-def get_versions(tg): 
-    return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/version-groups", {"group": tg})
+def get_type_groups(brand, car_class): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/type-groups", {"manufacturer": brand, "class": car_class})
+def get_versions(tg): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/version-groups", {"group": tg})
 def get_car_hsn_tsn(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/car", {"carTag": tag})
 def get_tpms(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/tpms/carTpms", {"carTag": tag})
 
-# ==========================================
-# 輔助函式
-# ==========================================
+# ====================== 輔助 ======================
 def format_year(d): 
     return "至今" if not d or d == "0000-00-00" else d[:7]
 
@@ -117,13 +108,10 @@ def find_key_value(d, keywords):
             if res: return res
     return ""
 
-# ==========================================
-# 資料庫
-# ==========================================
+# ====================== 資料庫 ======================
 def save_batch_to_sql(batch_data):
     if not batch_data: return
     df = pd.DataFrame(batch_data).fillna("")
-
     group_cols = ['品牌', '車系', '型號', '年份起點', '年份終點', 'HSN', 'TSN']
     agg_dict = {
         'OE感測器': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
@@ -131,9 +119,7 @@ def save_batch_to_sql(batch_data):
         '頻率(Frequenz)': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
         '建設日期(Baujahr)': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
     }
-    for col in group_cols:
-        agg_dict[col] = 'first'
-
+    for col in group_cols: agg_dict[col] = 'first'
     df_merged = df.groupby(group_cols, as_index=False).agg(agg_dict)
     cols = ['品牌','車系','型號','年份起點','年份終點','HSN','TSN',
             '建設日期(Baujahr)','OE感測器','廠商(Hersteller)','頻率(Frequenz)']
@@ -156,10 +142,10 @@ def auto_export_sql():
         for line in conn.iterdump():
             f.write(f'{line}\n')
     conn.close()
-    print(f"🎉 SQL 備份完成: {os.path.basename(SQL_PATH)}")
+    print(f"🎉 SQL 備份完成")
 
 # ==========================================
-# 主程式（已修正兩個重大風險）
+# 主程式
 # ==========================================
 def main_scraper_all():
     folder_path = os.path.join(SCRIPT_DIR, sanitize_filename("胎壓偵測"))
@@ -175,38 +161,38 @@ def main_scraper_all():
 
     # 建立資料表
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('''CREATE TABLE IF NOT EXISTS tpms_sensors (
-        品牌 TEXT, 車系 TEXT, 型號 TEXT, 年份起點 TEXT, 年份終點 TEXT,
-        HSN TEXT, TSN TEXT, "建設日期(Baujahr)" TEXT, 
-        OE感測器 TEXT, "廠商(Hersteller)" TEXT, "頻率(Frequenz)" TEXT,
-        UNIQUE(品牌, 車系, 型號, 年份起點, HSN, TSN)
-    )''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS tpms_sensors (
+            品牌 TEXT, 車系 TEXT, 型號 TEXT, 年份起點 TEXT, 年份終點 TEXT,
+            HSN TEXT, TSN TEXT, "建設日期(Baujahr)" TEXT, 
+            OE感測器 TEXT, "廠商(Hersteller)" TEXT, "頻率(Frequenz)" TEXT,
+            UNIQUE(品牌, 車系, 型號, 年份起點, HSN, TSN)
+        )
+    ''')
     conn.commit()
     conn.close()
 
-    batch_data = []   # ← 移到最外層，避免跨品牌污染
+    batch_data = []
+    print(f"🔍 開始處理 {len(brands)} 個品牌...\n")
 
-    for brand in brands:
-        if skip_mode and brand != prog["last_brand"]: continue
-        if skip_mode and brand == prog["last_brand"]:
+    for brand in tqdm(brands, desc="總品牌進度", ncols=100):
+        if skip_mode and brand != prog.get("last_brand"):
+            tqdm.write(f"⏭️ 已完成: {brand} ✅")
+            continue
+
+        if skip_mode and brand == prog.get("last_brand"):
             skip_mode = False
-            print(f"▶️ 從 {brand} 恢復抓取")
+            tqdm.write(f"▶️ 從 {brand} 繼續")
 
-        print(f"\n【品牌】{brand}")
+        tqdm.write(f"\n🚗 處理品牌: 【{brand}】")
         save_progress(brand=brand)
 
         classes = get_classes(brand)
-        if not isinstance(classes, list):
-            classes = []
+        if not isinstance(classes, list): classes = []
 
-        for car_class in classes:
-            if skip_mode and car_class != prog.get("last_class"): continue
-            if skip_mode and car_class == prog.get("last_class"):
-                skip_mode = False
-
+        for car_class in tqdm(classes, desc=f"{brand} 車系", leave=False, ncols=80):
             type_groups = get_type_groups(brand, car_class)
-            if not isinstance(type_groups, list):
-                type_groups = []
+            if not isinstance(type_groups, list): type_groups = []
 
             for tg_data in type_groups:
                 tg_id = tg_data.get("group") if isinstance(tg_data, dict) else None
@@ -215,7 +201,6 @@ def main_scraper_all():
                 if skip_mode and tg_id != prog.get("last_tg"): continue
                 if skip_mode:
                     skip_mode = False
-                    print(f"▶️ 恢復: {brand} > {car_class} > {tg_id}")
 
                 save_progress(brand, car_class, tg_id)
 
@@ -231,7 +216,7 @@ def main_scraper_all():
                     year_to = format_year(version.get("productionTo"))
                     model_version = version.get("version", "")
 
-                    time.sleep(random.uniform(0.25, 0.65))
+                    time.sleep(random.uniform(0.65, 1.35))
 
                     try:
                         car_details = get_car_hsn_tsn(car_tag)
@@ -242,14 +227,14 @@ def main_scraper_all():
                         oe_list = []
 
                         if isinstance(tpms_data, dict) and "tpms" in tpms_data:
-                            for s in tpms_data["tpms"]:
+                            for s in tpms_data.get("tpms", []):
                                 if s.get("oeAm") == "O":
                                     hersteller = s.get("hersteller") or find_key_value(s, ['hersteller','manufacturer','marke'])
                                     frequenz = s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
                                     if not frequenz:
                                         sd = str(s).lower()
-                                        frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
-                                    baujahr = s.get("baujahr") or find_key_value(s, ['baujahr','year'])
+                                        frequenz = next((f for f in ['433','434','315'] if f in sd), '')
+                                    baujahr = s.get("baujahr") or find_key_value(s, ['baujahr'])
                                     if not baujahr or baujahr == "0000-00-00":
                                         baujahr = f"{year_from} ~ {year_to}"
                                     oe_list.append({
@@ -278,30 +263,38 @@ def main_scraper_all():
                             batch_data.clear()
 
                     except Exception as e:
-                        print(f"⚠️ 處理異常 {model_version}: {e}")
+                        tqdm.write(f"⚠️ 錯誤 {model_version}: {e}")
 
-            # === 每個車系結束後強制存檔（解決風險1）===
             if batch_data:
                 save_batch_to_sql(batch_data)
                 batch_data.clear()
+            tqdm.write(f"   ✅ 車系完成: {car_class}")
 
-        # 品牌結束後匯出 Excel
+        # 每個品牌掃描完成後，匯出 Excel 備份
         try:
             conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("SELECT * FROM tpms_sensors WHERE 品牌=?", conn, params=(brand,))
+            df_brand = pd.read_sql_query("SELECT * FROM tpms_sensors WHERE 品牌=?", conn, params=(brand,))
             conn.close()
-            if not df.empty:
-                df['年份'] = df['年份起點'].astype(str) + " ~ " + df['年份終點'].astype(str)
-                order = ['品牌','車系','型號','年份','HSN','TSN','建設日期(Baujahr)',
-                        'OE感測器','廠商(Hersteller)','頻率(Frequenz)']
-                df = df.reindex(columns=order)
-                path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
-                df.to_excel(path, index=False)
-                print(f"📊 {brand} Excel 匯出完成 → {len(df)} 筆")
-        except Exception as e:
-            print(f"⚠️ Excel 匯出失敗: {e}")
 
-    print("\n🎉 全部品牌處理完成！")
+            if not df_brand.empty:
+                df_brand['年份'] = df_brand['年份起點'].astype(str) + " ~ " + df_brand['年份終點'].astype(str)
+                columns_order = [
+                    '品牌', '車系', '型號', '年份', 'HSN', 'TSN', 
+                    '建設日期(Baujahr)', 'OE感測器', '廠商(Hersteller)', '頻率(Frequenz)'
+                ]
+                df_brand = df_brand.reindex(columns=columns_order)
+                
+                safe_brand_name = sanitize_filename(brand)
+                excel_name = os.path.join(folder_path, f"{safe_brand_name}_Data.xlsx")
+                df_brand.to_excel(excel_name, index=False)
+        except Exception as e:
+            tqdm.write(f"  ⚠️ [警告] 匯出 Excel 發生錯誤: {e}")
+
+        tqdm.write(f"🎉 品牌完成: 【{brand}】 ✅\n")
+
+    print("\n" + "="*70)
+    print("🎊 所有任務已完成！")
+    print("="*70)
     save_progress(completed=True)
     auto_export_sql()
 
