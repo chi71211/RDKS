@@ -1,8 +1,18 @@
 import sys
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+import os
+
+# ==========================================
+# 解決 Windows 終端機中文亂碼問題
+# ==========================================
+if sys.platform == 'win32':
+    import codecs
+    # 強制將 Windows 的標準輸出和標準錯誤設定為 UTF-8
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
+else:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import sqlite3
-import os
 import requests
 import pandas as pd
 import re
@@ -21,7 +31,7 @@ DB_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.db')
 SQL_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.sql')
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'scrape_progress.json')
 
-# 🌟 新增：設定最大執行時間（5.8 小時 = 20880 秒），預留時間給 GitHub 存檔
+# 設定最大執行時間（5.8 小時 = 20880 秒），預留時間給 GitHub 存檔
 MAX_RUNTIME_SECONDS = 5.8 * 3600 
 PROGRAM_START_TIME = time.time()
 
@@ -96,6 +106,13 @@ def get_versions(tg):
     return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/version-groups", {"group": tg})
 def get_car_hsn_tsn(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/car", {"carTag": tag})
 def get_tpms(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/tpms/carTpms", {"carTag": tag})
+
+# 🌟 新增：取得感測器詳細資訊的 API 函式
+def get_sensor_details(manufacturer_ids):
+    if not manufacturer_ids: return {}
+    # 將陣列轉換為逗號分隔的字串，例如 "700084,700085"
+    ids_str = ",".join(map(str, manufacturer_ids)) if isinstance(manufacturer_ids, list) else str(manufacturer_ids)
+    return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/gpsr/data", {"manufacturerIds": ids_str})
 
 def format_year(d): 
     return "至今" if not d or d == "0000-00-00" else d[:7]
@@ -186,7 +203,7 @@ def main_scraper_all():
 
     batch_data = []
     completed_brands = []
-    time_limit_reached = False # 🌟 新增：超時標記
+    time_limit_reached = False
 
     print(f"🔍 共 {len(brands)} 個品牌\n")
 
@@ -234,11 +251,10 @@ def main_scraper_all():
                 versions.sort(key=lambda x: x.get('productionFrom', ''), reverse=True)
 
                 for version in versions:
-                    # 🌟 核心：每次處理前檢查是否即將超時
                     if time.time() - PROGRAM_START_TIME > MAX_RUNTIME_SECONDS:
                         tqdm.write(f"\n⏱️ 警告：執行時間即將超過 6 小時限制！觸發安全暫停...")
                         time_limit_reached = True
-                        break # 中斷最內層迴圈
+                        break
 
                     car_tag = str(version.get("tag") or version.get("carTag") or "")
                     if not car_tag: continue
@@ -258,16 +274,60 @@ def main_scraper_all():
                         oe_list = []
 
                         if isinstance(tpms_data, dict) and "tpms" in tpms_data:
+                            # 🌟 新增：批次抓取詳細資訊，減少 API 請求次數
+                            sensor_ids = []
                             for s in tpms_data["tpms"]:
                                 if s.get("oeAm") == "O":
-                                    hersteller = s.get("hersteller") or find_key_value(s, ['hersteller','manufacturer','marke'])
-                                    frequenz = s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
+                                    m_id = s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId")
+                                    if m_id: sensor_ids.append(m_id)
+                            
+                            details_dict = {}
+                            if sensor_ids:
+                                time.sleep(random.uniform(0.3, 0.7)) 
+                                detailed_info = get_sensor_details(sensor_ids)
+                                if isinstance(detailed_info, list):
+                                    for item in detailed_info:
+                                        # 建立 ID 對映表，方便後續查找
+                                        item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
+                                        if item_id: details_dict[str(item_id)] = item
+                                elif isinstance(detailed_info, dict):
+                                    # 有些 API 回傳外層包了一個 dict
+                                    data_list = detailed_info.get("data", []) or detailed_info.get("items", [])
+                                    if isinstance(data_list, list):
+                                        for item in data_list:
+                                            item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
+                                            if item_id: details_dict[str(item_id)] = item
+                                    else:
+                                        details_dict = detailed_info # 最差狀況直接把它當 dict 搜
+
+                            for s in tpms_data["tpms"]:
+                                if s.get("oeAm") == "O":
+                                    # 取得剛剛查到的詳細資料
+                                    m_id = str(s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId") or "")
+                                    s_detail = details_dict.get(m_id, {}) if m_id else {}
+
+                                    # 優先從詳細資料 (s_detail) 中抓取，如果沒有再從簡略資料 (s) 抓
+                                    hersteller = s_detail.get("hersteller") or s.get("hersteller") or find_key_value(s, ['hersteller','manufacturer','marke'])
+                                    frequenz = s_detail.get("frequenz") or s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
+                                    
                                     if not frequenz:
-                                        sd = str(s).lower()
+                                        sd = str(s).lower() + str(s_detail).lower()
                                         frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
-                                    baujahr = s.get("baujahr") or find_key_value(s, ['baujahr','year'])
+                                    
+                                    # 🌟 核心修正：優先抓取詳細資料中的 Baujahr，並加入正則硬撈
+                                    baujahr = s_detail.get("baujahr") or s.get("baujahr", "")
+                                    if not baujahr:
+                                        s_str = str(s) + str(s_detail)
+                                        # 找尋類似 07/2022 - 或 01/2019 - 12/2021 格式
+                                        match = re.search(r'(\d{2}/\d{4}\s*-(\s*\d{2}/\d{4})?)', s_str)
+                                        if match:
+                                            baujahr = match.group(1).strip()
+                                        else:
+                                            baujahr = find_key_value(s, ['baujahr'])
+                                            
                                     if not baujahr or baujahr == "0000-00-00":
                                         baujahr = f"{year_from} ~ {year_to}"
+                                        
                                     oe_list.append({
                                         "oe": str(s.get("tpmsDescFrontend", "")),
                                         "baujahr": baujahr,
@@ -296,7 +356,6 @@ def main_scraper_all():
                     except Exception as e:
                         tqdm.write(f"⚠️ 異常 {model_version}: {e}")
 
-            # 車系結束後強制存檔
             if batch_data:
                 save_batch_to_sql(batch_data)
                 batch_data.clear()
@@ -304,7 +363,6 @@ def main_scraper_all():
             if not time_limit_reached:
                 tqdm.write(f"   ✅ 車系完成: {car_class}")
 
-        # 品牌完成後匯出 Excel
         try:
             conn = sqlite3.connect(DB_PATH)
             df = pd.read_sql_query("SELECT * FROM tpms_sensors WHERE 品牌=?", conn, params=(brand,))
@@ -324,14 +382,13 @@ def main_scraper_all():
             completed_brands.append(brand)
             tqdm.write(f"🎉 品牌完成: 【{brand}】 ✅")
 
-    # 最終總結
     print("\n" + "="*60)
     if time_limit_reached:
         print("⏸️ 爬蟲任務因接近 6 小時限制而暫停！")
         print(f"進度已安全儲存，下次將從斷點繼續。")
     else:
         print("🎊 爬蟲任務全部完成！")
-        save_progress(completed=True) # 只有全部跑完才清除進度
+        save_progress(completed=True)
 
     print(f"✅ 此次共完整處理 {len(completed_brands)} 個品牌")
     print("="*60)
