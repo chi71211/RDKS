@@ -6,7 +6,6 @@ import os
 # ==========================================
 if sys.platform == 'win32':
     import codecs
-    # 強制將 Windows 的標準輸出和標準錯誤設定為 UTF-8
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
 else:
@@ -27,11 +26,10 @@ from tqdm import tqdm
 # 全域設定
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.db')
-SQL_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測.sql')
-PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'scrape_progress.json')
+DB_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測優化.db')
+SQL_PATH = os.path.join(SCRIPT_DIR, '胎壓偵測優化.sql')
+PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'scrape_progress優化.json')
 
-# 設定最大執行時間（5.8 小時 = 20880 秒），預留時間給 GitHub 存檔
 MAX_RUNTIME_SECONDS = 5.8 * 3600 
 PROGRAM_START_TIME = time.time()
 
@@ -107,10 +105,8 @@ def get_versions(tg):
 def get_car_hsn_tsn(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/cars/car", {"carTag": tag})
 def get_tpms(tag): return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/tpms/carTpms", {"carTag": tag})
 
-# 🌟 新增：取得感測器詳細資訊的 API 函式
 def get_sensor_details(manufacturer_ids):
     if not manufacturer_ids: return {}
-    # 將陣列轉換為逗號分隔的字串，例如 "700084,700085"
     ids_str = ",".join(map(str, manufacturer_ids)) if isinstance(manufacturer_ids, list) else str(manufacturer_ids)
     return safe_json_get("https://www.interpneu-raederkonfigurator.de/api/gpsr/data", {"manufacturerIds": ids_str})
 
@@ -141,26 +137,29 @@ def save_batch_to_sql(batch_data):
     if not batch_data: return
     df = pd.DataFrame(batch_data).fillna("")
 
-    group_cols = ['品牌', '車系', '型號', '年份起點', '年份終點', 'HSN', 'TSN']
+    # 使用無引號的欄位名作為群組依據
+    group_cols = ['Brand', 'Model', 'Typ', 'Start Year', 'End Year', 'HSN', 'TSN']
     agg_dict = {
-        'OE感測器': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
-        '廠商(Hersteller)': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
-        '頻率(Frequenz)': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
-        '建設日期(Baujahr)': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
+        'OE sensor': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
+        'Manufacturer': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
+        'Frequency': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
+        'created date': lambda x: ', '.join(sorted({str(v).strip() for v in x if str(v).strip()})),
     }
     for col in group_cols:
         agg_dict[col] = 'first'
 
     df_merged = df.groupby(group_cols, as_index=False).agg(agg_dict)
-    cols = ['品牌','車系','型號','年份起點','年份終點','HSN','TSN',
-            '建設日期(Baujahr)','OE感測器','廠商(Hersteller)','頻率(Frequenz)']
+    
+    cols = ['Brand', 'Model', 'Typ', 'Start Year', 'End Year', 'HSN', 'TSN',
+            'created date', 'OE sensor', 'Manufacturer', 'Frequency']
     df_merged = df_merged.reindex(columns=cols)
 
     conn = sqlite3.connect(DB_PATH)
+    # 使用引號包裹所有欄位名稱，確保 SQLite 能接受帶有空格的欄位
     conn.executemany('''
         REPLACE INTO tpms_sensors 
-        (品牌, 車系, 型號, 年份起點, 年份終點, HSN, TSN, "建設日期(Baujahr)", 
-         OE感測器, "廠商(Hersteller)", "頻率(Frequenz)")
+        ("Brand", "Model", "Typ", "Start Year", "End Year", "HSN", "TSN", "created date", 
+         "OE sensor", "Manufacturer", "Frequency")
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', df_merged.values.tolist())
     conn.commit()
@@ -179,24 +178,23 @@ def auto_export_sql():
 # 主程式
 # ==========================================
 def main_scraper_all():
-    folder_path = os.path.join(SCRIPT_DIR, sanitize_filename("胎壓偵測"))
+    folder_path = os.path.join(SCRIPT_DIR, sanitize_filename("胎壓偵測優化"))
     os.makedirs(folder_path, exist_ok=True)
 
     brands = get_manufacturers()
     if not isinstance(brands, list) or not brands:
-        print("❌ 無法取得品牌清單")
+        print("❌ 無法取得Brand清單")
         return
 
     prog, _ = check_7_day_cycle()
     skip_mode = bool(prog.get("last_brand"))
 
-    # 建立資料表
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS tpms_sensors (
-        品牌 TEXT, 車系 TEXT, 型號 TEXT, 年份起點 TEXT, 年份終點 TEXT,
-        HSN TEXT, TSN TEXT, "建設日期(Baujahr)" TEXT, 
-        OE感測器 TEXT, "廠商(Hersteller)" TEXT, "頻率(Frequenz)" TEXT,
-        UNIQUE(品牌, 車系, 型號, 年份起點, HSN, TSN)
+        "Brand" TEXT, "Model" TEXT, "Typ" TEXT, "Start Year" TEXT, "End Year" TEXT,
+        "HSN" TEXT, "TSN" TEXT, "created date" TEXT, 
+        "OE sensor" TEXT, "Manufacturer" TEXT, "Frequency" TEXT,
+        UNIQUE("Brand", "Model", "Typ", "Start Year", "HSN", "TSN")
     )''')
     conn.commit()
     conn.close()
@@ -205,7 +203,7 @@ def main_scraper_all():
     completed_brands = []
     time_limit_reached = False
 
-    print(f"🔍 共 {len(brands)} 個品牌\n")
+    print(f"🔍 共 {len(brands)} 個Brand\n")
 
     for brand in tqdm(brands, desc="總進度", ncols=100):
         if time_limit_reached:
@@ -226,7 +224,7 @@ def main_scraper_all():
         classes = get_classes(brand)
         if not isinstance(classes, list): classes = []
 
-        for car_class in tqdm(classes, desc=f"{brand} 車系", leave=False, ncols=80):
+        for car_class in tqdm(classes, desc=f"{brand} Model", leave=False, ncols=80):
             if time_limit_reached:
                 break
 
@@ -274,7 +272,6 @@ def main_scraper_all():
                         oe_list = []
 
                         if isinstance(tpms_data, dict) and "tpms" in tpms_data:
-                            # 🌟 新增：批次抓取詳細資訊，減少 API 請求次數
                             sensor_ids = []
                             for s in tpms_data["tpms"]:
                                 if s.get("oeAm") == "O":
@@ -287,26 +284,22 @@ def main_scraper_all():
                                 detailed_info = get_sensor_details(sensor_ids)
                                 if isinstance(detailed_info, list):
                                     for item in detailed_info:
-                                        # 建立 ID 對映表，方便後續查找
                                         item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
                                         if item_id: details_dict[str(item_id)] = item
                                 elif isinstance(detailed_info, dict):
-                                    # 有些 API 回傳外層包了一個 dict
                                     data_list = detailed_info.get("data", []) or detailed_info.get("items", [])
                                     if isinstance(data_list, list):
                                         for item in data_list:
                                             item_id = item.get("manufacturerId") or item.get("id") or item.get("articleId")
                                             if item_id: details_dict[str(item_id)] = item
                                     else:
-                                        details_dict = detailed_info # 最差狀況直接把它當 dict 搜
+                                        details_dict = detailed_info
 
                             for s in tpms_data["tpms"]:
                                 if s.get("oeAm") == "O":
-                                    # 取得剛剛查到的詳細資料
                                     m_id = str(s.get("manufacturerId") or s.get("articleId") or s.get("id") or s.get("tpmsId") or "")
                                     s_detail = details_dict.get(m_id, {}) if m_id else {}
 
-                                    # 優先從詳細資料 (s_detail) 中抓取，如果沒有再從簡略資料 (s) 抓
                                     hersteller = s_detail.get("hersteller") or s.get("hersteller") or find_key_value(s, ['hersteller','manufacturer','marke'])
                                     frequenz = s_detail.get("frequenz") or s.get("frequenz") or find_key_value(s, ['frequenz','frequency','mhz'])
                                     
@@ -314,11 +307,9 @@ def main_scraper_all():
                                         sd = str(s).lower() + str(s_detail).lower()
                                         frequenz = '433' if '433' in sd else '434' if '434' in sd else '315' if '315' in sd else ''
                                     
-                                    # 🌟 核心修正：優先抓取詳細資料中的 Baujahr，並加入正則硬撈
                                     baujahr = s_detail.get("baujahr") or s.get("baujahr", "")
                                     if not baujahr:
                                         s_str = str(s) + str(s_detail)
-                                        # 找尋類似 07/2022 - 或 01/2019 - 12/2021 格式
                                         match = re.search(r'(\d{2}/\d{4}\s*-(\s*\d{2}/\d{4})?)', s_str)
                                         if match:
                                             baujahr = match.group(1).strip()
@@ -340,13 +331,13 @@ def main_scraper_all():
 
                         for info in oe_list:
                             batch_data.append({
-                                "品牌": brand, "車系": car_class, "型號": model_version,
-                                "年份起點": year_from, "年份終點": year_to,
+                                "Brand": brand, "Model": car_class, "Typ": model_version,
+                                "Start Year": year_from, "End Year": year_to,
                                 "HSN": hsn, "TSN": tsn,
-                                "建設日期(Baujahr)": info["baujahr"],
-                                "OE感測器": info["oe"],
-                                "廠商(Hersteller)": info["hersteller"],
-                                "頻率(Frequenz)": info["frequenz"]
+                                "created date": info["baujahr"],
+                                "OE sensor": info["oe"],
+                                "Manufacturer": info["hersteller"],
+                                "Frequency": info["frequenz"]
                             })
 
                         if len(batch_data) >= 80:
@@ -361,15 +352,15 @@ def main_scraper_all():
                 batch_data.clear()
 
             if not time_limit_reached:
-                tqdm.write(f"   ✅ 車系完成: {car_class}")
+                tqdm.write(f"   ✅ Model完成: {car_class}")
 
         try:
             conn = sqlite3.connect(DB_PATH)
-            df = pd.read_sql_query("SELECT * FROM tpms_sensors WHERE 品牌=?", conn, params=(brand,))
+            df = pd.read_sql_query('SELECT * FROM tpms_sensors WHERE "Brand"=?', conn, params=(brand,))
             conn.close()
             if not df.empty:
-                df['年份'] = df['年份起點'].astype(str) + " ~ " + df['年份終點'].astype(str)
-                order = ['品牌','車系','型號','年份','HSN','TSN','建設日期(Baujahr)','OE感測器','廠商(Hersteller)','頻率(Frequenz)']
+                df['年份'] = df['Start Year'].astype(str) + " ~ " + df['End Year'].astype(str)
+                order = ['Brand','Model','Typ','年份','HSN','TSN','created date','OE sensor','Manufacturer','Frequency']
                 df = df.reindex(columns=order)
                 path = os.path.join(folder_path, f"{sanitize_filename(brand)}_Data.xlsx")
                 df.to_excel(path, index=False)
@@ -380,7 +371,7 @@ def main_scraper_all():
 
         if not time_limit_reached:
             completed_brands.append(brand)
-            tqdm.write(f"🎉 品牌完成: 【{brand}】 ✅")
+            tqdm.write(f"🎉 Brand完成: 【{brand}】 ✅")
 
     print("\n" + "="*60)
     if time_limit_reached:
@@ -390,7 +381,7 @@ def main_scraper_all():
         print("🎊 爬蟲任務全部完成！")
         save_progress(completed=True)
 
-    print(f"✅ 此次共完整處理 {len(completed_brands)} 個品牌")
+    print(f"✅ 此次共完整處理 {len(completed_brands)} 個Brand")
     print("="*60)
 
     auto_export_sql()
