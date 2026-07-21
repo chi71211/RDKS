@@ -1,7 +1,7 @@
 🚗 RDKS 自動爬蟲系統 - 運作流程圖 (V7 終極版)
 
 本流程圖展示了 V7 版本的核心架構，包含：「雙重 API 深度抓取」、「6 小時超時防護」、「斷點無縫接關」以及「SQL View 自動聚合合併」機制。
-
+```mermaid
 flowchart TD
     %% 自定義顏色與樣式
     classDef startEnd fill:#ff5252,stroke:#333,stroke-width:2px,color:#fff,font-weight:bold;
