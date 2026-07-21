@@ -59,7 +59,7 @@ A: 請手動將資料夾內的 胎壓檢測器資料庫_V7.db 與 scrape_progres
 🚗 RDKS 自動爬蟲系統 - 完整運作模式流程圖 (V7)
 
 這份流程圖展示了 V7 版本的底層運作邏輯，特別是包含了新增的「深度 API 抓取」以及「SQL View 極致壓縮」流程。我們透過顏色區分了不同的作業階段，讓流程更加清晰易懂。
-
+```mermaid
 flowchart TD
     %% 節點樣式定義
     classDef startEnd fill:#4a148c,stroke:#fff,stroke-width:2px,color:#fff,rx:20px,ry:20px;
