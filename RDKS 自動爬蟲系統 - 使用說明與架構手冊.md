@@ -2,14 +2,7 @@
 
 本流程圖展示了 V7 版本的核心架構，包含：「雙重 API 深度抓取」、「6 小時超時防護」、「斷點無縫接關」以及「SQL View 自動聚合合併」機制。
 
-flowchart TD
-    %% 自定義顏色與樣式
-    classDef startEnd fill:#ff5252,stroke:#333,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef loop fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#000,font-weight:bold;
-    classDef check fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
-    classDef api fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#000,font-weight:bold;
-    classDef db fill:#ede7f6,stroke:#7b1fa2,stroke-width:2px,color:#000;
-    classDef process fill:#f5f5f5,stroke:#9e9e9e,stroke-width:2px,color:#000;
+```mermaid
 
     Start((啟動爬蟲)) ::: startEnd --> LoadProg[讀取上次進度 scrape_progress] ::: process
     
