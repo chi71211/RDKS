@@ -64,13 +64,11 @@ class DatabaseManager:
                 Category TEXT,
                 Fuel_Type TEXT,
                 Typ TEXT,
-                Year TEXT,
+                Start_Year TEXT,
+                End_Year TEXT,
                 HSN_TSN TEXT,
                 Power TEXT,
-                Price TEXT,
-                Acceleration TEXT,
-                Consumption TEXT,
-                UNIQUE(Brand, Model, Category, Fuel_Type, Typ, Year, HSN_TSN)
+                UNIQUE(Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN)
             )
         ''')
 
@@ -88,10 +86,10 @@ class DatabaseManager:
         self.cursor.execute('''
             CREATE VIEW view_car_catalog AS
             SELECT
-                Brand, Model, Category, Fuel_Type, Typ, Year, HSN_TSN,
-                Power, Price, Acceleration, Consumption
+                Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year,
+                HSN_TSN, Power
             FROM car_catalog
-            GROUP BY Brand, Model, Category, Fuel_Type, Typ, Year, HSN_TSN
+            GROUP BY Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN
         ''')
         self.conn.commit()
 
@@ -106,15 +104,14 @@ class DatabaseManager:
         for r in self.batch:
             self.cursor.execute('''
                 INSERT OR IGNORE INTO car_catalog
-                (Brand, Model, Category, Fuel_Type, Typ, Year, HSN_TSN, Power, Price, Acceleration, Consumption)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (Brand, Model, Category, Fuel_Type, Typ, Start_Year, End_Year, HSN_TSN, Power)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 r.get('Brand', 'N/A'), r.get('Model', 'N/A'),
                 r.get('Category', 'N/A'), r.get('Fuel_Type', 'N/A'),
-                r.get('Typ', 'N/A'), r.get('Year', 'N/A'),
-                r.get('HSN_TSN', 'N/A'), r.get('Power', 'N/A'),
-                r.get('Price', 'N/A'), r.get('Acceleration', 'N/A'),
-                r.get('Consumption', 'N/A')
+                r.get('Typ', 'N/A'), r.get('Start_Year', 'N/A'),
+                r.get('End_Year', 'N/A'), r.get('HSN_TSN', 'N/A'),
+                r.get('Power', 'N/A')
             ))
         self.conn.commit()
         self.batch.clear()
@@ -152,11 +149,11 @@ class DatabaseManager:
     def get_stats(self):
         try:
             df = pd.read_sql_query('''
-                SELECT Brand, Fuel_Type,
+                SELECT Brand, Fuel_Type, Category,
                        COUNT(DISTINCT Model) as Models,
                        COUNT(*) as Rows
                 FROM view_car_catalog
-                GROUP BY Brand, Fuel_Type
+                GROUP BY Brand, Fuel_Type, Category
                 ORDER BY Brand, Fuel_Type
             ''', self.conn)
             return df
@@ -518,18 +515,29 @@ class AutoBildScraper:
         records = []
         body_type = page_data.get('jsonBodyType') or 'N/A'
         body_map = {
-            'fliessheck': 'Fließheck',
-            'limousine': 'Limousine',
-            'suv': 'SUV',
-            'cabrio': 'Cabrio',
-            'coupe': 'Coupé',
-            'kombi': 'Kombi',
-            'van': 'Van',
-            'geländewagen': 'Geländewagen',
-            'kleinwagen': 'Kleinwagen'
+            'fliessheck': '掀背車',
+            'limousine': '轎車',
+            'suv': '休旅車',
+            'cabrio': '敞篷車',
+            'coupe': '雙門跑車',
+            'kombi': '旅行車',
+            'van': '廂型車',
+            'geländewagen': '越野車',
+            'kleinwagen': '小型車'
         }
         if body_type.lower() in body_map:
             body_type = body_map[body_type.lower()]
+
+        fuel_map = {
+            'benzin': '汽油',
+            'diesel': '柴油',
+            'elektro': '電動',
+            'benzin/hybrid': '油電混合',
+            'erdgas': '天然氣',
+            'autogas': '液化石油氣',
+            'plug-in-hybrid': '插電式油電混合',
+            'wasserstoff': '氫燃料'
+        }
 
         tech_rows = {}
         if page_data.get('editorialTable'):
@@ -541,12 +549,9 @@ class AutoBildScraper:
             fuel = v.get('fuelType', 'N/A')
             if fuel_type_filter and fuel != fuel_type_filter:
                 continue
+            fuel_zh = fuel_map.get(fuel.lower(), fuel)
 
             power = v.get('power', 'N/A')
-            acc = v.get('acceleration', 'N/A')
-            cons = v.get('consumption', 'N/A')
-            price = v.get('price', 'N/A')
-
             if power == 'N/A' and 'leistung' in tech_rows:
                 vals = tech_rows['leistung'].get('values', [])
                 if vals:
@@ -557,18 +562,27 @@ class AutoBildScraper:
                 subtitle = page_data.get('headerSubtitle', '')
                 year = extract_date_range(subtitle)
 
+            start_year = 'N/A'
+            end_year = 'N/A'
+            if year and year != 'N/A':
+                parts = re.split(r'\s*[–-]\s*', year.replace('seit ', ''))
+                if len(parts) == 2:
+                    start_year = parts[0].strip()
+                    end_year = parts[1].strip()
+                elif len(parts) == 1:
+                    start_year = parts[0].strip()
+                    end_year = '至今'
+
             records.append({
                 'Brand': brand,
                 'Model': model,
                 'Category': body_type,
-                'Fuel_Type': fuel,
+                'Fuel_Type': fuel_zh,
                 'Typ': v.get('name', 'N/A'),
-                'Year': year,
+                'Start_Year': start_year,
+                'End_Year': end_year,
                 'HSN_TSN': 'N/A',
-                'Power': power,
-                'Price': price,
-                'Acceleration': acc,
-                'Consumption': cons
+                'Power': power
             })
 
         return records
@@ -712,11 +726,11 @@ def show_status():
     conn = sqlite3.connect(Config.DB_FILE)
     try:
         df = pd.read_sql_query('''
-            SELECT Brand, Fuel_Type,
+            SELECT Brand, Fuel_Type, Category,
                    COUNT(DISTINCT Model) as Models,
                    COUNT(*) as Rows
             FROM view_car_catalog
-            GROUP BY Brand, Fuel_Type
+            GROUP BY Brand, Fuel_Type, Category
             ORDER BY Brand, Fuel_Type
         ''', conn)
         if df.empty:
