@@ -1,4 +1,4 @@
-name: 自動化 胎壓 爬蟲
+name: AutoBild_Exports
 
 on:
   schedule:
