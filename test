@@ -1,10 +1,10 @@
 """
-AutoBild 爬蟲系統 - 終極企業版 (v10.0 極簡雙表直球對決版)
+AutoBild 爬蟲系統 - 終極企業版 (v10.1 審查報告修復版)
 特色：
-1. 資料庫極簡化：嚴格遵守指示，只保留 1 個資料表 (car_catalog) 與 1 個視圖 (view)。
-2. 拔除狀態表：刪除所有自作聰明的續傳邏輯，強制每台車都爬取，由資料庫 UNIQUE 自動去重，解決「沒寫進去」的問題。
-3. 自動路徑修正：解決 VS Code 右上角箭頭執行時造成的 Read-only 唯讀報錯。
-4. 終極展開與新分頁擷取：完美展開多層次分類與「顯示更多」，背景分頁精準挖字。
+1. 修正路徑比對：引入 urljoin 解決相對路徑 startswith 失敗問題。
+2. 精準按鈕定位：修復 ALLE MODELLE 點擊與 vvp_fuelType-dataFooterToggleButton 展開機制。
+3. 結構化 JSON 擷取：直接解析 #vike_pageContext 取得最乾淨的 HSN/TSN 與細節資料。
+4. 容錯與重試：加入 Cookie 全局攔截、正則拆分與詳細頁面指數退避重試。
 """
 
 import nest_asyncio
@@ -16,12 +16,12 @@ import random
 import sqlite3
 import argparse
 import pandas as pd
+import re
+from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 from IPython.display import display
 
-# ==========================================
-# 🌟 自動切換到程式所在目錄，解決右上角箭頭的唯讀問題
-# ==========================================
+# 自動切換到程式所在目錄
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class Config:
@@ -32,11 +32,36 @@ class Config:
     BATCH_SIZE = 50
     DELAY_MIN = 0.8
     DELAY_MAX = 1.6
+    MAX_RETRIES = 3
 
 async def smart_delay(success=True):
     delay = random.uniform(Config.DELAY_MIN, Config.DELAY_MAX) if success else random.uniform(2.5, 4.5)
     if random.random() < 0.15: delay += random.uniform(1.0, 3.0)
     await asyncio.sleep(max(0.5, min(delay, 6.0)))
+
+async def dismiss_cookie(page):
+    """全局 Cookie 攔截器"""
+    try:
+        iframe = page.frame_locator('iframe[id^="sp_message_iframe"]')
+        btn = iframe.get_by_role("button", name="Alle akzeptieren")
+        await btn.click(timeout=5000)
+    except:
+        pass
+
+def search_json(data, target_keys):
+    """遞迴搜尋 JSON 鍵值"""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if str(k).lower() in target_keys and v and str(v).strip() and str(v).strip() != '-':
+                return str(v).strip()
+        for v in data.values():
+            res = search_json(v, target_keys)
+            if res: return res
+    elif isinstance(data, list):
+        for item in data:
+            res = search_json(item, target_keys)
+            if res: return res
+    return None
 
 class DatabaseManager:
     def __init__(self):
@@ -47,11 +72,9 @@ class DatabaseManager:
         self._init_db()
     
     def _init_db(self):
-        # 🌟 聽您的！把之前多餘的狀態表全部刪掉，保持資料庫乾淨
         self.cursor.execute('DROP TABLE IF EXISTS model_status')
         self.cursor.execute('DROP TABLE IF EXISTS system_metadata')
         
-        # 1. 唯一的核心資料表
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS car_catalog (
                 Brand TEXT, Model TEXT, Category TEXT, Fuel_Type TEXT, Typ TEXT, Year TEXT, HSN_TSN TEXT,
@@ -59,17 +82,11 @@ class DatabaseManager:
             )
         ''')
         
-        # 2. 唯一的報表檢視圖 (自動把相同的車款 HSN_TSN 串接)
         self.cursor.execute('DROP VIEW IF EXISTS view_car_catalog_unique')
         self.cursor.execute('''
             CREATE VIEW view_car_catalog_unique AS
             SELECT 
-                Brand, 
-                Model, 
-                Category,
-                Fuel_Type,
-                Typ, 
-                Year, 
+                Brand, Model, Category, Fuel_Type, Typ, Year, 
                 GROUP_CONCAT(HSN_TSN, ', ') AS HSN_TSN
             FROM car_catalog
             GROUP BY Brand, Model, Category, Fuel_Type, Typ, Year
@@ -84,7 +101,6 @@ class DatabaseManager:
     def flush(self):
         if not self.batch: return
         for r in self.batch:
-            # 使用 INSERT OR IGNORE，遇到重複資料自動忽略，絕不報錯
             self.cursor.execute('''
                 INSERT OR IGNORE INTO car_catalog (Brand, Model, Category, Fuel_Type, Typ, Year, HSN_TSN)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -107,7 +123,7 @@ class DatabaseManager:
 
 async def full_catalog_scraper(test_mode=False):
     print("\n🚀 ==============================================")
-    print("AutoBild 爬蟲系統 - v10.0 極簡直球對決版啟動")
+    print("AutoBild 爬蟲系統 - v10.1 報告修復版啟動")
     db = DatabaseManager()
     print("==============================================\n")
     
@@ -118,13 +134,7 @@ async def full_catalog_scraper(test_mode=False):
         
         try:
             await page.goto(Config.CATALOG_URL, timeout=90000, wait_until="domcontentloaded")
-            await smart_delay()
-            
-            # 同意 Cookie
-            try:
-                iframe = page.frame_locator('iframe[id^="sp_message_iframe"]')
-                await iframe.get_by_role("button", name="Alle akzeptieren").click(timeout=8000)
-            except: pass
+            await dismiss_cookie(page)
             
             await page.evaluate("window.scrollTo(0, 1200)")
             await smart_delay()
@@ -138,7 +148,9 @@ async def full_catalog_scraper(test_mode=False):
                 if href and "/marken-modelle/" in href and href.count("/") >= 4:
                     full = Config.BASE_URL + href if not href.startswith("http") else href
                     full = full.split("#")[0].split("?")[0]
-                    if full.endswith("/") and full not in seen:
+                    # 修正：補齊尾部斜線避免過濾問題
+                    full = full.rstrip("/") + "/"
+                    if full not in seen:
                         seen.add(full)
                         brand_urls.append(full)
             
@@ -149,28 +161,34 @@ async def full_catalog_scraper(test_mode=False):
                 base_brand = b_url.strip("/").split("/")[-1].upper()
                 print(f"\n➔ 進入廠牌: {base_brand}")
                 await page.goto(b_url, timeout=60000, wait_until="domcontentloaded")
+                await dismiss_cookie(page)
                 await smart_delay()
                 
-                # 🌟 步驟 1：強制點擊 ALLE MODELLE
+                # 修正：更穩健的 ALLE MODELLE 比對方式
                 await page.evaluate(r'''() => {
-                    const btns = Array.from(document.querySelectorAll('a, button, li, span')).filter(el => el.innerText && el.innerText.trim().toUpperCase() === 'ALLE MODELLE');
+                    const btns = Array.from(document.querySelectorAll('button')).filter(el => 
+                        el.textContent && el.textContent.replace(/\s+/g, '').trim().toUpperCase() === 'ALLEMODELLE'
+                    );
                     if(btns.length > 0) btns[0].click();
                 }''')
                 await asyncio.sleep(2.0)
                 
-                model_links = await page.query_selector_all("a[href*='/marken-modelle/']")
+                # 修正：使用 modelTeaser_link 或 urljoin 處理相對路徑
+                model_links = await page.query_selector_all(".modelTeaser_link, a[href*='/marken-modelle/']")
                 models = []
                 for ml in model_links:
                     h = await ml.get_attribute("href")
-                    if h and h.count("/") > b_url.count("/") and h.startswith(b_url):
-                        full_m = Config.BASE_URL + h if not h.startswith("http") else h
-                        models.append(full_m.split("#")[0])
+                    if h:
+                        full_h = urljoin(Config.BASE_URL, h).split("#")[0]
+                        if full_h.startswith(b_url.rstrip("/")):
+                            models.append(full_h)
                 models = list(dict.fromkeys(models))
                 if test_mode: models = models[:2]
 
                 for m_url in models:
                     base_model = m_url.strip("/").split("/")[-1].replace("-", " ").title()
                     await page.goto(m_url, timeout=60000, wait_until="domcontentloaded")
+                    await dismiss_cookie(page)
                     
                     await page.evaluate(r'''async () => {
                         window.scrollBy(0, 800);
@@ -179,14 +197,14 @@ async def full_catalog_scraper(test_mode=False):
                     }''')
                     await asyncio.sleep(1.5)
 
-                    # 🌟 步驟 2：點擊 ALLE DATEN & VARIANTEN
+                    # 點擊 ALLE DATEN & VARIANTEN
                     await page.evaluate(r'''() => {
                         const btns = Array.from(document.querySelectorAll('a, button, li, span, div, h2')).filter(el => el.innerText && el.innerText.toUpperCase().includes('ALLE DATEN & VARIANTEN'));
                         if(btns.length > 0) { try { btns[0].click(); } catch(e){} }
                     }''')
                     await asyncio.sleep(2.0)
 
-                    # 🌟 步驟 3：展開所有變體 (Kraftstoffarten, Karosserie 等)
+                    # 展開所有變體
                     await page.evaluate(r'''() => {
                         const headers = Array.from(document.querySelectorAll('div, span, button, h2, h3, a')).filter(el => {
                             let txt = el.innerText || '';
@@ -196,103 +214,94 @@ async def full_catalog_scraper(test_mode=False):
                     }''')
                     await asyncio.sleep(2.0)
                     
-                    # 🌟 步驟 4：瘋狂點擊 WEITERE VARIANTEN ANZEIGEN 直到消失
+                    # 修正：使用 class 選擇器點擊無文字的 SVG 箭頭按鈕
                     while True:
                         clicked = await page.evaluate(r'''() => {
-                            const moreBtns = Array.from(document.querySelectorAll('div, span, button')).filter(b => b.innerText && b.innerText.includes('WEITERE VARIANTEN ANZEIGEN') && b.offsetParent !== null);
-                            if (moreBtns.length > 0) {
-                                try { moreBtns[0].click(); return true; } catch(e) {}
+                            const btn = document.querySelector('.vvp_fuelType-dataFooterToggleButton');
+                            if (btn && btn.offsetParent !== null) {
+                                btn.click();
+                                return true;
                             }
                             return false;
                         }''')
-                        if not clicked:
-                            break
+                        if not clicked: break
                         await asyncio.sleep(1.2)
 
-                    # 🌟 步驟 5：收集畫面上所有展開後的專屬 URL
+                    # 修正：精確收集變體 URL，解決 A 標籤不存在問題
                     vehicle_hrefs = await page.evaluate(r'''() => {
-                        return Array.from(document.querySelectorAll('.vvp__fuelType-dataBodyRow')).map(row => {
-                            const a = row.querySelector('a');
-                            return a ? a.getAttribute('href') : null;
-                        }).filter(h => h);
+                        return Array.from(document.querySelectorAll('.vv_fuelType-dataBodyLineLink a, .vvp_fuelType-dataBodyRowCol a, a[href*="/marken-modelle/"]'))
+                            .map(a => a.getAttribute('href'))
+                            .filter(h => h && h.includes('marken-modelle') && h.split('/').length >= 6);
                     }''')
                     
                     vehicle_hrefs = list(dict.fromkeys(vehicle_hrefs))
-                    
-                    # 🌟 單頁防呆：如果網頁沒有清單(如 Xiaomi)，就把當下這頁當作唯一車款
                     if not vehicle_hrefs:
                         vehicle_hrefs = [m_url]
 
                     total_variants_in_model = len(vehicle_hrefs)
-                    print(f"  ↳ [{base_brand} - {base_model}] 成功展開 {total_variants_in_model} 個獨立車款，開始背景擷取...")
+                    print(f"  ↳ [{base_brand} - {base_model}] 鎖定 {total_variants_in_model} 個獨立車款，開始背景擷取...")
 
-                    # 🌟 步驟 6：背景開新分頁擷取詳細資料
                     for i, href in enumerate(vehicle_hrefs):
                         if test_mode and i >= 3: break
                         
-                        detail_url = Config.BASE_URL + href if not href.startswith('http') else href
+                        detail_url = urljoin(Config.BASE_URL, href)
                         detail_page = await context.new_page()
                         
-                        try:
-                            await detail_page.goto(detail_url, timeout=45000, wait_until="domcontentloaded")
-                            
-                            # 展開詳細頁面的折疊表格
-                            await detail_page.evaluate(r'''() => {
-                                Array.from(document.querySelectorAll('span, div, h3, h4, button'))
-                                    .filter(el => el.textContent && (el.textContent.trim() === 'Basisdaten' || el.textContent.trim().includes('Motor')))
-                                    .forEach(b => { try{b.click();}catch(e){} try{if(b.parentElement) b.parentElement.click();}catch(e){} });
-                            }''')
-                            await asyncio.sleep(1.0)
-                            
-                            # 終極精準挖字 (直接從 Basisdaten 挖出所有分類)
-                            dom_data = await detail_page.evaluate(r'''() => {
-                                let data = { Typ: 'N/A', Year: 'N/A', HSN_TSN: 'N/A', Category: 'N/A', Fuel_Type: 'N/A' };
+                        # 修正：加入重試機制
+                        for attempt in range(Config.MAX_RETRIES):
+                            try:
+                                await detail_page.goto(detail_url, timeout=45000, wait_until="domcontentloaded")
+                                await dismiss_cookie(detail_page)
+                                await asyncio.sleep(1.0)
                                 
-                                let titleEl = document.querySelector('h1, .vvp__vehicleTitle');
-                                if(titleEl) data.Typ = titleEl.innerText.trim().replace(/\n/g, ' ');
-
-                                let allCells = Array.from(document.querySelectorAll('div, span, td, th'));
-                                for (let j = 0; j < allCells.length; j++) {
-                                    let txt = allCells[j].innerText ? allCells[j].innerText.trim().toLowerCase().replace(/:$/, '') : '';
-                                    if (!txt) continue;
-                                    let val = allCells[j+1] ? allCells[j+1].innerText.trim() : '';
-                                    
-                                    if (txt === 'modell' && data.Typ === 'N/A') data.Typ = val;
-                                    if ((txt === 'bauzeitraum' || txt === 'baujahr' || txt === 'produktionszeitraum') && data.Year === 'N/A') data.Year = val;
-                                    if ((txt === 'hsn/tsn schlüsselnummern' || txt === 'hsn/tsn' || txt === 'schlüsselnummer') && data.HSN_TSN === 'N/A') data.HSN_TSN = val;
-                                    if (txt === 'karosserieform' && data.Category === 'N/A') data.Category = val;
-                                    if (txt === 'kraftstoffart' && data.Fuel_Type === 'N/A') data.Fuel_Type = val;
-                                }
-                                return data;
-                            }''')
-                            
-                            final_brand = base_brand
-                            final_variant = dom_data.get('Typ', 'N/A')
-                            final_year = dom_data.get('Year', 'N/A')
-                            final_hsn_tsn = dom_data.get('HSN_TSN', 'N/A')
-                            final_category = dom_data.get('Category', 'N/A')
-                            final_fuel = dom_data.get('Fuel_Type', 'N/A')
-
-                            # 髒字防呆過濾
-                            if final_variant == 'N/A' or "auswählen" in final_variant.lower():
+                                # 修正：直接解析 vike_pageContext 取得最純淨的 JSON 資料
+                                car_data_json = await detail_page.evaluate(r'''() => {
+                                    const el = document.querySelector('#vike_pageContext');
+                                    return el ? JSON.parse(el.textContent) : null;
+                                }''')
+                                
+                                final_brand = base_brand
                                 final_variant = f"Typ_{i+1}"
-                            if final_year == 'N/A' or "kraftstoffart" in final_year.lower():
                                 final_year = "N/A"
-
-                            # 寫入資料庫 (交給 SQLite UNIQUE 處理去重)
-                            if final_hsn_tsn != 'N/A' and ',' in final_hsn_tsn:
-                                for code in [c.strip() for c in final_hsn_tsn.split(',')]:
-                                    db.add_to_batch({"Brand": final_brand, "Model": base_model, "Category": final_category, "Fuel_Type": final_fuel, "Typ": final_variant, "Year": final_year, "HSN_TSN": code})
-                            else:
-                                db.add_to_batch({"Brand": final_brand, "Model": base_model, "Category": final_category, "Fuel_Type": final_fuel, "Typ": final_variant, "Year": final_year, "HSN_TSN": final_hsn_tsn})
+                                final_hsn_tsn = "N/A"
+                                final_category = "N/A"
+                                final_fuel = "N/A"
                                 
-                            sys.stdout.write(f"\r      [寫入中] {final_fuel[:10]} - 第 {i+1}/{total_variants_in_model} 款: {final_variant[:20]}...")
-                            sys.stdout.flush()
-
-                        except Exception as e:
-                            pass
-                        finally:
-                            await detail_page.close()
+                                if car_data_json:
+                                    ext_var = search_json(car_data_json, ['bezeichnung', 'variant', 'name', 'title'])
+                                    ext_year = search_json(car_data_json, ['baujahr', 'bauzeitraum', 'production', 'sale_start'])
+                                    ext_cat = search_json(car_data_json, ['karosserieform', 'constructiontype'])
+                                    ext_fuel = search_json(car_data_json, ['kraftstoffart', 'fueltype'])
+                                    
+                                    hsn = search_json(car_data_json, ['hsn', 'hsn_tsn_schluesselnummern', 'schlüsselnummer']) or "N/A"
+                                    tsn = search_json(car_data_json, ['tsn']) or "N/A"
+                                    
+                                    if ext_var: final_variant = ext_var
+                                    if ext_year: final_year = ext_year
+                                    if ext_cat: final_category = ext_cat
+                                    if ext_fuel: final_fuel = ext_fuel
+                                    final_hsn_tsn = f"{hsn}/{tsn}" if (hsn != "N/A" and tsn != "N/A") else hsn
+                                
+                                # 修正：支援多種分隔符拆分 HSN/TSN
+                                if final_hsn_tsn != 'N/A' and final_hsn_tsn != 'N/A/N/A':
+                                    codes = re.split(r'[,;\n\r]+', final_hsn_tsn)
+                                    codes = [c.strip() for c in codes if c.strip()]
+                                    for code in codes:
+                                        db.add_to_batch({"Brand": final_brand, "Model": base_model, "Category": final_category, "Fuel_Type": final_fuel, "Typ": final_variant, "Year": final_year, "HSN_TSN": code})
+                                else:
+                                    db.add_to_batch({"Brand": final_brand, "Model": base_model, "Category": final_category, "Fuel_Type": final_fuel, "Typ": final_variant, "Year": final_year, "HSN_TSN": final_hsn_tsn})
+                                    
+                                sys.stdout.write(f"\r      [寫入中] {final_fuel[:10]} - 第 {i+1}/{total_variants_in_model} 款: {final_variant[:20]}...")
+                                sys.stdout.flush()
+                                break
+                            except Exception as e:
+                                if attempt == Config.MAX_RETRIES - 1:
+                                    pass
+                                else:
+                                    await asyncio.sleep(2 ** attempt)
+                            finally:
+                                if attempt == Config.MAX_RETRIES - 1 or 'car_data_json' in locals():
+                                    await detail_page.close()
 
                     print() 
                     db.flush()
@@ -309,24 +318,12 @@ async def full_catalog_scraper(test_mode=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true")
-    # 保留 reset 功能以防您未來想手動清空整個 DB，但現在預設執行就不會卡跳過了
     parser.add_argument("--reset", action="store_true")
-    parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
     
     if args.reset:
         if os.path.exists(Config.DB_FILE): os.remove(Config.DB_FILE)
         print("✅ 舊資料庫已完全重置！")
-        sys.exit(0)
-        
-    if args.status:
-        if os.path.exists(Config.DB_FILE):
-            conn = sqlite3.connect(Config.DB_FILE)
-            try:
-                df = pd.read_sql("SELECT Brand, Fuel_Type, COUNT(DISTINCT Model) as Models, COUNT(*) as Total_Rows FROM view_car_catalog_unique GROUP BY Brand, Fuel_Type", conn)
-                display(df)
-            except: pass
-            conn.close()
         sys.exit(0)
     
     asyncio.run(full_catalog_scraper(test_mode=args.test))
