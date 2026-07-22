@@ -1,4 +1,4 @@
-name: 自動化 RDKS 爬蟲 (V10)
+name: 自動胎壓檢測器爬蟲 (V10)
 
 # 設定排程時間
 on:
@@ -24,12 +24,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安裝所需套件 (包含 tqdm)
+      - name: 安裝 requirements.txt 中的套件
         run: |
-          pip install requests pandas openpyxl urllib3 tqdm
+          pip install -r requirements.txt
 
       - name: 執行爬蟲腳本
-        run: python 胎壓檢測器資料庫.py
+        run: python 胎壓檢測器.py
 
       - name: 上傳爬取結果 (Artifacts 下載備份)
         if: always()
