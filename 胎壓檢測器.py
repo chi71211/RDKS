@@ -433,6 +433,3 @@ def main_scraper_all():
 
 if __name__ == "__main__":
     main_scraper_all()
-```eof
-
-I've generated the corrected Python script. The error in the image (`SyntaxError: invalid character '，' (U+FF0C)`) occurred because some Chinese text from a previous conversation (`配合我們上一版已經設定好的...`) was accidentally pasted into the `胎壓檢測器.py` file around line 436. I have provided the clean, correct code above. Please replace the contents of your `胎壓檢測器.py` file with this new version.
