@@ -31,55 +31,55 @@
 
 ```mermaid
 flowchart TD
-    Start([在 VS Code 手動點擊 Run 啟動]) --> InstallReq[自動檢查並安裝缺失套件\n包含突破 uv/PEP 668 限制]
-    InstallReq --> LoadProg[讀取 scrape_progress_weekly.json 紀錄]
+    Start([在 VS Code 手動點擊 Run 啟動]) --> InstallReq["自動檢查並安裝缺失套件\n包含突破 uv/PEP 668 限制"]
+    InstallReq --> LoadProg["讀取 scrape_progress_weekly.json 紀錄"]
     
-    LoadProg --> Check7Days{距離上次「全新掃描」\n是否超過 7 天?}
+    LoadProg --> Check7Days{"距離上次「全新掃描」\n是否超過 7 天?"}
     
-    Check7Days -- 是 (超過 7 天) --> FullMode[啟動【全面更新模式】\n清除斷點紀錄，準備從頭掃描]
-    Check7Days -- 否 (7 天內) --> ResumeMode[啟動【繼續進度模式】\n讀取上次中斷的品牌/車系斷點]
+    Check7Days -- 是 (超過 7 天) --> FullMode["啟動【全面更新模式】\n清除斷點紀錄，準備從頭掃描"]
+    Check7Days -- 否 (7 天內) --> ResumeMode["啟動【繼續進度模式】\n讀取上次中斷的品牌/車系斷點"]
     
-    FullMode --> SetupDB[(建立/連接 SQLite 資料庫)]
+    FullMode --> SetupDB[("建立/連接 SQLite 資料庫")]
     ResumeMode --> SetupDB
     
-    SetupDB --> InitView[(建立 SQL View 視圖\n設定自動壓縮與合併邏輯)]
+    SetupDB --> InitView[("建立 SQL View 視圖\n設定自動壓縮與合併邏輯")]
     
-    InitView --> BrandLoop[遍歷所有汽車品牌 Brand]
+    InitView --> BrandLoop["遍歷所有汽車品牌 Brand"]
     
-    BrandLoop --> CheckSkip{品牌是否需要略過?\n(因還沒到達斷點)}
-    CheckSkip -- 是 --> SkipBrand[跳過此品牌] --> BrandLoop
-    CheckSkip -- 否 --> SaveProg[儲存目前進度 (更新 JSON)]
+    BrandLoop --> CheckSkip{"品牌是否需要略過?\n(因還沒到達斷點)"}
+    CheckSkip -- 是 --> SkipBrand["跳過此品牌"] --> BrandLoop
+    CheckSkip -- 否 --> SaveProg["儲存目前進度 (更新 JSON)"]
     
-    SaveProg --> ClassLoop[遍歷該品牌所有車系 Model]
-    ClassLoop --> TGLoop[遍歷型號 Typ]
+    SaveProg --> ClassLoop["遍歷該品牌所有車系 Model"]
+    ClassLoop --> TGLoop["遍歷型號 Typ"]
     
-    TGLoop --> VersionLoop[依年份從新到舊排序版本]
+    TGLoop --> VersionLoop["依年份從新到舊排序版本"]
     
-    VersionLoop --> CheckManualStop{使用者是否按下\nCtrl+C 或 停止鍵?}
+    VersionLoop --> CheckManualStop{"使用者是否按下\nCtrl+C 或 停止鍵?"}
     
-    CheckManualStop -- 是 --> GracefulStop([觸發安全中斷訊號])
-    CheckManualStop -- 否 --> ApiCall1[呼叫 API 1: 取得基礎 TPMS 與 HSN/TSN]
+    CheckManualStop -- 是 --> GracefulStop(["觸發安全中斷訊號"])
+    CheckManualStop -- 否 --> ApiCall1["呼叫 API 1: 取得基礎 TPMS 與 HSN/TSN"]
     
-    ApiCall1 --> CheckOE{是否有 OE 原廠感測器?}
-    CheckOE -- 無 --> EmptyData[寫入空值保留車型] --> AddBatch
-    CheckOE -- 有 --> ApiCall2[呼叫 API 2: 批次取得感測器深度資訊]
+    ApiCall1 --> CheckOE{"是否有 OE 原廠感測器?"}
+    CheckOE -- 無 --> EmptyData["寫入空值保留車型"] --> AddBatch
+    CheckOE -- 有 --> ApiCall2["呼叫 API 2: 批次取得感測器深度資訊"]
     
-    ApiCall2 --> ParseData[解析感測器資訊 - 廠商, 頻率, 建造日期]
-    ParseData --> AddBatch[加入暫存佇列 batch_data]
+    ApiCall2 --> ParseData["解析感測器資訊 - 廠商, 頻率, 建造日期"]
+    ParseData --> AddBatch["加入暫存佇列 batch_data"]
     
-    AddBatch --> CheckBatch{暫存累積超過 80 筆?}
-    CheckBatch -- 是 --> SaveDB[(寫入資料庫: 使用 REPLACE INTO 去重覆寫)]
-    SaveDB --> ClearBatch[清空暫存區] --> VersionLoop
+    AddBatch --> CheckBatch{"暫存累積超過 80 筆?"}
+    CheckBatch -- 是 --> SaveDB[("寫入資料庫: 使用 REPLACE INTO 去重覆寫")]
+    SaveDB --> ClearBatch["清空暫存區"] --> VersionLoop
     CheckBatch -- 否 --> VersionLoop
     
     VersionLoop -- 版本處理完畢 --> TGLoop
-    TGLoop -- 型號處理完畢 --> FlushRemain[(強制寫入殘留暫存資料)]
+    TGLoop -- 型號處理完畢 --> FlushRemain[("強制寫入殘留暫存資料")]
     FlushRemain --> ClassLoop
     
-    ClassLoop -- 車系處理完畢 --> ExportExcel[查詢 SQL View 匯出 Excel 壓縮報表]
+    ClassLoop -- 車系處理完畢 --> ExportExcel["查詢 SQL View 匯出 Excel 壓縮報表"]
     ExportExcel --> BrandLoop
     
-    BrandLoop -- 所有品牌處理完畢 --> Finalize[清除斷點紀錄，標記本輪任務完成]
-    GracefulStop --> ExportSQL[(匯出 .sql 備份檔)]
+    BrandLoop -- 所有品牌處理完畢 --> Finalize["清除斷點紀錄，標記本輪任務完成"]
+    GracefulStop --> ExportSQL[("匯出 .sql 備份檔")]
     Finalize --> ExportSQL
-    ExportSQL --> End([程式安全結束])
+    ExportSQL --> End(["程式安全結束"])
