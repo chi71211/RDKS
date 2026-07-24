@@ -179,9 +179,23 @@ flowchart LR
 ---
 【簡化版流程圖 / 技術架構展示】
 
-```mermaid
+🚗 RDKS 爬蟲系統核心架構圖 (簡報專用版)
 
+此版本去除了繁瑣的迴圈返回線條，將系統抽象為四大平行階段，呈現完美的 1x4 橫向佈局，最適合用於簡報提案。同時套用了專業的深色背景與高對比色彩。
+
+```mermaid
 flowchart LR
+
+    %% ==========================================
+    %% 視覺樣式定義 (致敬參考圖配色)
+    %% ==========================================
+    classDef startEnd fill:#fff,stroke:#333,stroke-width:2px,color:#000,font-weight:bold;
+    classDef diamond fill:#fff,stroke:#555,stroke-width:2px,color:#000,font-weight:bold;
+    classDef greenBox fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20,font-weight:bold;
+    classDef redBox fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#b71c1c,font-weight:bold;
+    classDef actionBox fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1,font-weight:bold;
+    classDef dbBox fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#e65100,font-weight:bold;
+    classDef warningBox fill:#fff8e1,stroke:#fbc02d,stroke-width:2px,color:#f57f17,font-weight:bold;
 
     %% ==========================================
     %% 階段 1：啟動與防護
@@ -194,6 +208,7 @@ flowchart LR
         A3 -- 是 --> A4["【全面更新】\n清除舊斷點紀錄"]
         A3 -- 否 --> A5["【繼續進度】\n載入 JSON 斷點"]
     end
+    style P1 fill:#2d2d2d,stroke:#555,color:#fff
 
     %% ==========================================
     %% 階段 2：資料庫與導航
@@ -205,6 +220,7 @@ flowchart LR
         B3 --> B4["遍歷車系與型號\n(Model / Typ)"]
         B4 --> B5["依年份新到舊排序\n(Year)"]
     end
+    style P2 fill:#2d2d2d,stroke:#555,color:#fff
 
     %% ==========================================
     %% 階段 3：靜態 API 攔截
@@ -220,6 +236,7 @@ flowchart LR
         C4 --> C5["解析 JSON 結構\n(廠商/頻率/日期)"]
         C5 --> C6["加入暫存佇列\n(batch_data)"]
     end
+    style P3 fill:#2d2d2d,stroke:#555,color:#fff
 
     %% ==========================================
     %% 階段 4：寫入與安全退出
@@ -241,6 +258,7 @@ flowchart LR
         D6 -- "(所有品牌完成)" --> D7
         D7 --> D8([程式安全退出])
     end
+    style P4 fill:#2d2d2d,stroke:#555,color:#fff
 
     %% ==========================================
     %% 跨區塊連線 (強制建立 1 -> 2 -> 3 -> 4 佈局)
@@ -253,19 +271,14 @@ flowchart LR
     C6 --> D1
 
     %% ==========================================
-    %% 顏色與樣式設定
+    %% 統一套用顏色類別 (GitHub 100% 相容寫法)
     %% ==========================================
-    classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
-    classDef redBox fill:#ffe6e6,stroke:#d32f2f,stroke-width:2px;
-    classDef blueBox fill:#e3f2fd,stroke:#1976d2,stroke-width:2px;
-    classDef greenBox fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
-    classDef yellowDB fill:#fff8e1,stroke:#fbc02d,stroke-width:2px;
-    classDef diamond stroke-dasharray: 5 5, fill:#fff;
-
-    class A4,A5 redBox;
-    class B3,B4,B5 blueBox;
-    class C1,C4,C5 greenBox;
-    class B1,B2,D3,D5,D7 yellowDB;
+    class A1,D8 startEnd;
     class A3,C2,D1,D2 diamond;
+    class A5,C5,D6 greenBox;
+    class A4,D5 redBox;
+    class A2,B3,B4,B5,C1,C4,C6,D4 actionBox;
+    class B1,B2,D3,D7 dbBox;
+    class C3 warningBox;
 ```
 
