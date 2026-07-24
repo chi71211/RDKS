@@ -23,16 +23,13 @@
 執行完畢後，所有最新資料會自動儲存於 `胎壓資料庫_每週更新版/` 資料夾內，並依據汽車品牌分類為獨立的 Excel 報表。
 
 
-# 🚗 RDKS 爬蟲系統運作流程圖 (VS Code 手動執行版)
-
-本流程圖展示了在 VS Code 手動啟動下，系統如何運作，包含環境檢查、週期判斷與中斷保護。
 
 ## 詳細完整流程圖
 
 🚗 RDKS 爬蟲系統運作流程圖 (完整架構版)
 
 此版本詳實記錄了系統底層的每一道邏輯防線、迴圈控制與異常處理機制。
-
+```mermaid
 flowchart TD
     Start([在 VS Code 手動點擊 Run 啟動]) --> InstallReq["自動檢查並安裝缺失套件\n(包含突破 uv/PEP 668 限制)"]
     InstallReq --> LoadProg["讀取 scrape_progress_weekly.json 紀錄"]
@@ -92,7 +89,7 @@ flowchart TD
 ---
 【簡化版流程圖 / 技術架構展示】
 
-```
+```mermaid
 
 flowchart LR
 
